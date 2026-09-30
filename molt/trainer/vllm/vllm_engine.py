@@ -104,6 +104,8 @@ class RolloutRayActor:
     def __init__(self, *args, bundle_indices: list = None, **kwargs):
         backend = kwargs.get("distributed_executor_backend")
         num_gpus = kwargs.pop("num_gpus")
+        self._enable_auto_tool_choice = kwargs.pop("enable_auto_tool_choice", False)
+        self._tool_call_parser = kwargs.pop("tool_call_parser", None)
         self._configure_device_env(
             backend=backend,
             bundle_indices=bundle_indices,
@@ -151,6 +153,9 @@ class RolloutRayActor:
         if hasattr(args, "enable_scale_out"):
             args.enable_scale_out = True
         args.host, args.port = host, port
+        args.enable_auto_tool_choice = self._enable_auto_tool_choice
+        if self._tool_call_parser:
+            args.tool_call_parser = self._tool_call_parser
 
         supported_tasks = await self.llm.get_supported_tasks()
         model_config = self.llm.model_config
@@ -311,6 +316,8 @@ def create_vllm_engines(
     enable_return_routed_experts: bool = False,
     pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
+    enable_auto_tool_choice: bool = False,
+    tool_call_parser: Optional[str] = None,
 ):
     """Spin up a set of vLLM Ray actors on a dedicated placement group.
 
@@ -430,6 +437,10 @@ def create_vllm_engines(
             "num_gpus": num_gpus,
             "worker_num_gpus": worker_num_gpus,
         }
+        if enable_auto_tool_choice:
+            actor_kwargs["enable_auto_tool_choice"] = True
+        if tool_call_parser:
+            actor_kwargs["tool_call_parser"] = tool_call_parser
 
         if max_images_per_prompt > 0:
             actor_kwargs["limit_mm_per_prompt"] = {"image": max_images_per_prompt}

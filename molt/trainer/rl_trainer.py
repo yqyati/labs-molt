@@ -911,7 +911,12 @@ class TrainingActor(BaseRLTrainer):
             # gen<<train => vllm_idle_wait large (vLLM wasted); long eval => actor_idle_wait large.
             status["timing/vllm_idle_wait"] = vllm_idle_wait
             status["timing/actor_idle_wait"] = actor_idle_wait
-            status["timing/step_total"] = time.time() - step_start_time
+            step_total = time.time() - step_start_time
+            status["timing/step_total"] = step_total
+            # Ratios make topology comparisons easier than raw seconds: they
+            # show how much of each step was spent waiting on the other side.
+            status["timing/vllm_idle_ratio"] = min(1.0, max(0.0, vllm_idle_wait / max(step_total, 1e-9)))
+            status["timing/actor_idle_ratio"] = min(1.0, max(0.0, actor_idle_wait / max(step_total, 1e-9)))
             step_start_time = time.time()
 
             # rollout/dropped/<reason> counts + dynamic_filtering_pass_rate (when enabled).

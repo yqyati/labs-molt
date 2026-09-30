@@ -65,6 +65,7 @@ ARG SITE=/usr/local/lib/python3.12/dist-packages
 ARG ARCH_LIST="8.0 9.0 10.0"
 ARG NVTE_CUDA_ARCHS="80;90;100"
 ARG DEEPEP_ARCH_LIST="9.0 10.0"
+ARG COMPILE_JOBS=2
 
 # torch's bundled nvidia-*-cu13 wheels hold cudnn.h / nccl.h / cublas etc. The bare base
 # has no system NCCL/cuDNN dev headers, so every --no-build-isolation source build (TE,
@@ -117,7 +118,7 @@ RUN python -m pip install nvidia-mathdx==25.1.1 && \
     cd /opt/TransformerEngine && git fetch origin release_v2.14 && git checkout FETCH_HEAD && \
     git submodule init && git submodule update && \
     CPATH="$(for d in ${SITE}/nvidia/*/include; do printf '%s:' "$d"; done)${CPATH:-}" \
-    NVTE_CUDA_ARCHS="${NVTE_CUDA_ARCHS}" NVTE_BUILD_THREADS_PER_JOB=8 \
+    NVTE_CUDA_ARCHS="${NVTE_CUDA_ARCHS}" NVTE_BUILD_THREADS_PER_JOB="${COMPILE_JOBS}" NVTE_BUILD_MAX_JOBS=1 MAX_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL=1 NINJAFLAGS=-j1 \
         python -m pip install --no-cache-dir --no-build-isolation --no-deps -v . && \
     cd / && rm -rf /opt/TransformerEngine
 
@@ -125,7 +126,7 @@ RUN python -m pip install nvidia-mathdx==25.1.1 && \
 RUN git clone https://github.com/Dao-AILab/flash-attention.git /opt/flash-attention && \
     cd /opt/flash-attention && git checkout v2.8.3 && \
     CPATH="$(for d in ${SITE}/nvidia/*/include; do printf '%s:' "$d"; done)${CPATH:-}" \
-    FLASH_ATTENTION_FORCE_BUILD=TRUE MAX_JOBS=8 TORCH_CUDA_ARCH_LIST="${ARCH_LIST}" \
+    FLASH_ATTENTION_FORCE_BUILD=TRUE MAX_JOBS="${COMPILE_JOBS}" NVCC_THREADS=1 TORCH_CUDA_ARCH_LIST="${ARCH_LIST}" \
         python -m pip install --no-build-isolation --no-deps . && \
     cd / && rm -rf /opt/flash-attention
 
@@ -138,7 +139,7 @@ RUN for repo in "https://github.com/Dao-AILab/causal-conv1d.git@v1.6.2@/opt/caus
         find csrc -type f \( -name '*.cu' -o -name '*.cuh' -o -name '*.h' -o -name '*.cpp' \) \
             -exec sed -i -e 's/cub::LaneId()/(threadIdx.x \& 31u)/g' -e 's/cub::CTA_SYNC()/__syncthreads()/g' {} + && \
         CPATH="$(for d in ${SITE}/nvidia/*/include; do printf '%s:' "$d"; done)${CPATH:-}" \
-        env "${flag}=TRUE" MAX_JOBS=8 TORCH_CUDA_ARCH_LIST="${ARCH_LIST}" \
+        env "${flag}=TRUE" MAX_JOBS="${COMPILE_JOBS}" TORCH_CUDA_ARCH_LIST="${ARCH_LIST}" \
             python -m pip install --no-build-isolation --no-deps . && cd /; \
     done && rm -rf /opt/causal-conv1d /opt/mamba
 
@@ -170,7 +171,7 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
     ln -sf ${NVSHMEM_LIB_PATH}/libnvshmem_host.so.3 ${NVSHMEM_LIB_PATH}/libnvshmem_host.so && \
     env RDMA_CORE_HOME=${RDMA_CORE_HOME} HYBRID_EP_MULTINODE=1 \
         LD_LIBRARY_PATH=/usr/local/cuda/lib64/:${LD_LIBRARY_PATH:-} \
-        TORCH_CUDA_ARCH_LIST="${DEEPEP_ARCH_LIST}" MAX_JOBS=8 \
+        TORCH_CUDA_ARCH_LIST="${DEEPEP_ARCH_LIST}" MAX_JOBS="${COMPILE_JOBS}" \
         python -m pip install --no-cache-dir --no-build-isolation -v . && \
     apt-get purge -y libnvidia-ml-dev && apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/* /opt/deepep.patch && cd / && rm -rf /opt/DeepEP

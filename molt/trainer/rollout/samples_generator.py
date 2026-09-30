@@ -301,6 +301,40 @@ class SamplesGenerator:
                 leftover_samples.append(sample)
         self._finished_samples = leftover_samples
 
+        # Keep length telemetry with the exact batch sent to FSDP.  Rollout
+        # latency alone cannot explain a training OOM: long multi-turn
+        # trajectories may be rare, so report distribution tails as well as
+        # the mean. Heavy sequence tensors may already be offloaded; use the
+        # lightweight length fields retained on Experience instead.
+        if batch_samples:
+            total_lengths = []
+            action_lengths = []
+            clipped = []
+            for sample in batch_samples:
+                total_length = sample.total_length
+                if total_length is None:
+                    continue
+                total_lengths.append(int(total_length.reshape(-1)[0].item()))
+                response_length = sample.response_length
+                if response_length is not None:
+                    action_lengths.append(int(response_length.reshape(-1)[0].item()))
+                clip_flag = sample.info.get("response_clip_ratio")
+                if clip_flag is not None:
+                    clipped.append(bool(clip_flag.reshape(-1)[0].item()))
+
+            total_values = np.asarray(total_lengths, dtype=np.int64)
+            action_values = np.asarray(action_lengths, dtype=np.int64)
+            for prefix, values in (("rollout/total_tokens", total_values), ("rollout/action_tokens", action_values)):
+                if values.size == 0:
+                    continue
+                rollout_metrics[f"{prefix}_mean"] = float(values.mean())
+                rollout_metrics[f"{prefix}_p50"] = float(np.percentile(values, 50))
+                rollout_metrics[f"{prefix}_p95"] = float(np.percentile(values, 95))
+                rollout_metrics[f"{prefix}_max"] = float(values.max())
+            if clipped:
+                rollout_metrics["rollout/total_tokens_clipped_rate"] = float(np.mean(clipped) * 100)
+            rollout_metrics["rollout/length_stats_sample_count"] = float(len(total_values))
+
         # Exhausted only once the dataloader is done AND nothing is buffered or in flight.
         exhausted = self._dataloader_iter is None and not self._finished_samples and not self._inflight_rollouts
         self._round_exhausted = exhausted

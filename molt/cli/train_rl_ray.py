@@ -112,6 +112,8 @@ def train(args):
             enable_return_routed_experts=args.train.routing_replay,
             pipeline_parallel_size=getattr(args.vllm, "pipeline_parallel_size", 1),
             data_parallel_size=getattr(args.vllm, "data_parallel_size", 1),
+            enable_auto_tool_choice=args.vllm.enable_auto_tool_choice,
+            tool_call_parser=args.vllm.tool_call_parser,
         )
 
     # Rollout gateway: serve each engine's OpenAI API + the real vllm-router in front of them.
@@ -649,6 +651,18 @@ if __name__ == "__main__":
         "(Qwen3.6-MoE). Lossless (target verifies every token). 1 is a good default.",
     )
     parser.add_argument("--vllm.dtype", type=str, default="bfloat16", help="vLLM inference dtype")
+    parser.add_argument(
+        "--vllm.enable_auto_tool_choice",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable vLLM automatic tool choice for ChatAgent tool calls.",
+    )
+    parser.add_argument(
+        "--vllm.tool_call_parser",
+        type=str,
+        default=None,
+        help="vLLM tool-call parser used by the embedded OpenAI server.",
+    )
     parser.add_argument(
         "--vllm.gpu_memory_utilization",
         type=float,
