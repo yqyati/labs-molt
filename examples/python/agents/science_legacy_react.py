@@ -27,13 +27,14 @@ logger = init_logger(__name__)
 SCIENCE_AGENT_ROOT = Path(
     os.environ.get(
         "SCIENCE_AGENT_ROOT",
-        "/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/scientific_reasoning_and_research/liuzhuo/science-agent",
+        "/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/yangqingyu/workspace/harness/science-agent",
     )
 ).resolve()
 INFERENCE_ROOT = SCIENCE_AGENT_ROOT / "inference"
 for path in (SCIENCE_AGENT_ROOT, INFERENCE_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
+from science_agent.eval.answer_extraction import find_boxed_spans, select_hle_candidate
 
 from react_agent_openai_api_tools import MultiTurnReactAgent  # noqa: E402
 
@@ -44,6 +45,17 @@ def _text(value) -> str:
     if isinstance(value, str):
         return value
     return str(value)
+
+def _extract_hle_candidate(text: str) -> str:
+    # Legacy ReAct has already extracted the final <answer> block. HLE's
+    # boxed-answer selector expects raw model output; applying it to a plain
+    # answer such as "5003" would replace a valid prediction with "".
+    text = text.strip()
+    spans = find_boxed_spans(text)
+    if not spans:
+        return text
+    legacy = spans[-1].canonical if spans else ""
+    return select_hle_candidate(text, legacy).value
 
 
 class ScienceLegacyReactAgent(ChatAgent):
@@ -90,43 +102,77 @@ class ScienceLegacyReactAgent(ChatAgent):
             task["item"]["id"] = str(sample.get("id") or sample["question_id"])
         task["item"].update({k: v for k, v in sample.items() if k not in task["item"]})
         result = await asyncio.to_thread(agent._run, task, ctx.model_name)
-        prediction = _text(result.get("prediction") if isinstance(result, dict) else result)
+        raw_prediction = _text(result.get("prediction") if isinstance(result, dict) else result)
+        next_protocol = os.environ.get("SCIENCE_AGENT_NEXT_HLE_EVAL_PROTOCOL", "0").lower() in {"1", "true", "yes"}
+        prediction = _extract_hle_candidate(raw_prediction) if next_protocol else raw_prediction
         prediction_missing = isinstance(result, dict) and "prediction" not in result
         prediction_empty = not prediction.strip()
+        truncated = bool(result.get("truncated")) if isinstance(result, dict) else False
+        if next_protocol and prediction_empty and not truncated:
+            # An empty HLE candidate is unanswerable. Sending the reference to
+            # the judge with an empty candidate can produce false positives.
+            return Result(
+                reward=torch.tensor(0.0, dtype=torch.float32),
+                score=torch.tensor(0.0, dtype=torch.float32),
+                info={
+                    "science_judge_score": torch.tensor(0.0, dtype=torch.float32),
+                    "science_judge_valid": torch.tensor(0.0, dtype=torch.float32),
+                    "science_judge_skipped_empty": torch.tensor(1.0, dtype=torch.float32),
+                    "science_prediction_chars": torch.tensor(0.0, dtype=torch.float32),
+                    "science_prediction_missing": torch.tensor(float(prediction_missing), dtype=torch.float32),
+                    "science_prediction_empty": torch.tensor(1.0, dtype=torch.float32),
+                    "science_tool_calls": torch.tensor(float(sum(
+                        len(message.get("tool_calls") or [])
+                        for message in (result.get("messages", []) if isinstance(result, dict) else [])
+                        if isinstance(message, dict)
+                    )), dtype=torch.float32),
+                    "science_termination": result.get("termination", "") if isinstance(result, dict) else "",
+                    "science_prediction": "",
+                    "science_messages": json.dumps(result.get("messages", []) if isinstance(result, dict) else [], ensure_ascii=False, default=str),
+                },
+            )
+        if truncated:
+            tool_calls = sum(
+                len(message.get("tool_calls") or [])
+                for message in (result.get("messages", []) if isinstance(result, dict) else [])
+                if isinstance(message, dict)
+            )
+            return Result(
+                reward=torch.tensor(0.0, dtype=torch.float32),
+                score=torch.tensor(0.0, dtype=torch.float32),
+                truncated=True,
+                info={
+                    "science_judge_score": torch.tensor(0.0, dtype=torch.float32),
+                    "science_judge_valid": torch.tensor(0.0, dtype=torch.float32),
+                    "science_judge_skipped_truncated": torch.tensor(1.0, dtype=torch.float32),
+                    "science_prediction_chars": torch.tensor(float(len(prediction)), dtype=torch.float32),
+                    "science_prediction_missing": torch.tensor(float(prediction_missing), dtype=torch.float32),
+                    "science_prediction_empty": torch.tensor(float(prediction_empty), dtype=torch.float32),
+                    "science_tool_calls": torch.tensor(float(tool_calls), dtype=torch.float32),
+                    "science_truncated": torch.tensor(1.0, dtype=torch.float32),
+                    "science_termination": result.get("termination", "truncated response"),
+                    "science_prediction": prediction,
+                    "science_messages": json.dumps(result.get("messages", []), ensure_ascii=False, default=str),
+                },
+            )
         judge_url = os.environ["SCIENCE_AGENT_JUDGE_BASE_URL"].rstrip("/") + "/chat/completions"
         judge_model = os.environ["SCIENCE_AGENT_JUDGE_MODEL"]
         judge_result = None
         judge_error = ""
         judge_response_summary = ""
         judge_finish_reason = ""
-        judge_content_chars = 0
+        if next_protocol:
+            judge_system_prompt = ("You are a strict grader for physics problems. Given a problem and a candidate solution, decide whether the candidate answer is correct. Be strict: the final answer must match the ground truth (allow equivalent forms).")
+            judge_user_prompt = ("You will output ONLY valid JSON with this schema:\n{\"correct\": true/false, \"reason\": \"one-sentence reason\"}\n\n" f"Problem:\n{ctx.prompt}\n\nCandidate answer (model output):\n{prediction}\n\nGround truth answer:\n{reference}\n")
+        else:
+            judge_system_prompt = ("Judge whether the candidate answer is scientifically correct and answers the question. Accept equivalent wording and reasoning. Return only JSON: {\"score\": 1 or 0, \"correct\": true or false, \"reason\": \"short explanation\"}. Use score 1 only when the answer is substantially correct.")
+            judge_user_prompt = json.dumps({"question": ctx.prompt, "reference_answer": reference, "candidate_answer": prediction}, ensure_ascii=False)
         for attempt in range(3):
             judge_input = {
                 "model": judge_model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Judge whether the candidate answer is scientifically correct and answers the question. "
-                            "Accept equivalent wording and reasoning. Return only JSON: "
-                            '{"score": 1 or 0, "correct": true or false, "reason": "short explanation"}. '
-                            "Use score 1 only when the answer is substantially correct."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {"question": ctx.prompt, "reference_answer": reference, "candidate_answer": prediction},
-                            ensure_ascii=False,
-                        ),
-                    },
-                ],
-                # Match science-agent-next's OpenAI-compatible judge contract.
-                # Its gateway handles max_tokens + JSON mode reliably for o3-mini;
-                # max_completion_tokens=256 can be consumed by reasoning before
-                # any JSON content is emitted.
+                "messages": [{"role": "system", "content": judge_system_prompt}, {"role": "user", "content": judge_user_prompt}],
                 "temperature": 0.0,
-                "max_tokens": int(os.environ.get("SCIENCE_AGENT_JUDGE_MAX_TOKENS", "1800")),
+                "max_tokens": int(os.environ.get("SCIENCE_AGENT_JUDGE_MAX_TOKENS", "6000" if next_protocol else "1800")),
                 "response_format": {"type": "json_object"},
             }
             request = Request(
@@ -151,23 +197,17 @@ class ScienceLegacyReactAgent(ChatAgent):
                 content = _text(content).strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
                 judge_content_chars = len(content)
                 parsed = json.loads(content)
-                score = float(parsed["score"])
-                if score not in (0.0, 1.0) or bool(parsed["correct"]) != bool(score):
-                    raise ValueError(f"invalid judge result: {parsed!r}")
-                judge_result = parsed
+                if next_protocol:
+                    correct = parsed["correct"]
+                    if not isinstance(correct, bool):
+                        raise ValueError(f"invalid judge result: {parsed!r}")
+                    judge_result = {"correct": correct, "score": 1.0 if correct else 0.0, "reason": str(parsed.get("reason", ""))}
+                else:
+                    score = float(parsed["score"])
+                    if score not in (0.0, 1.0) or bool(parsed.get("correct")) != bool(score):
+                        raise ValueError(f"invalid judge result: {parsed!r}")
+                    judge_result = parsed
                 break
-            except HTTPError as exc:
-                error_body = exc.read(500).decode("utf-8", errors="replace")
-                judge_response_summary = error_body
-                judge_error = f"HTTPError: status={exc.code} reason={exc.reason}"
-                logger.warning(
-                    "Science judge HTTP failure attempt=%d/3 url=%s model=%s prediction_chars=%d "
-                    "missing_prediction=%s empty_prediction=%s error=%s response=%s",
-                    attempt + 1, judge_url, judge_model, len(prediction), prediction_missing,
-                    prediction_empty, judge_error, error_body,
-                )
-                if attempt < 2:
-                    await asyncio.sleep(2**attempt)
             except URLError as exc:
                 judge_error = f"URLError: {exc}"
                 logger.warning(
@@ -218,6 +258,8 @@ class ScienceLegacyReactAgent(ChatAgent):
                 "science_prediction_empty": torch.tensor(float(prediction_empty), dtype=torch.float32),
                 "science_tool_calls": torch.tensor(float(tool_calls), dtype=torch.float32),
                 "science_termination": result.get("termination", "") if isinstance(result, dict) else "",
+                "science_prediction": prediction,
+                "science_messages": json.dumps(result.get("messages", []) if isinstance(result, dict) else [], ensure_ascii=False, default=str),
             },
         )
 

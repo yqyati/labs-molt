@@ -1003,8 +1003,8 @@ class PolicyModelActor(BaseModelActor):
             client_states,
             metric_value=metric_value,
             metric_key=metric_key,
-            optimizer=self.actor_optim,
-            scheduler=self.actor_scheduler,
+            optimizer=self.actor_optim if args.ckpt.save_optimizer else None,
+            scheduler=self.actor_scheduler if args.ckpt.save_optimizer else None,
         )
         if self.save_hf_ckpt:
             # Versioned HF export mirrors the DCP layout (_actor/<tag>) and gets its own

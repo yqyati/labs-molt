@@ -64,7 +64,10 @@ def train(args):
         # Defaults respect user overrides (e.g. NCCL_DEBUG=INFO via
         # `ray job submit --runtime-env-json`); the listed names are
         # cache/workspace knobs vLLM and HF read inside Ray actors.
-        ray.init(runtime_env={"env_vars": _ray_runtime_env_vars()})
+        # Multi-node RJobs export RAY_ADDRESS after starting one head and one
+        # worker per node. Pass it explicitly so the driver cannot silently
+        # create a new local head and see only the GPUs on its own node.
+        ray.init(address=os.environ.get("RAY_ADDRESS"), runtime_env={"env_vars": _ray_runtime_env_vars()})
 
     # configure strategy
     strategy = get_strategy(args)

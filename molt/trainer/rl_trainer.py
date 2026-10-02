@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import json
 import os
 import statistics
 import time
@@ -819,6 +820,21 @@ class GenerateSamplesActor:
             if override is not None:
                 eval_kwargs[key] = override
         samples_list = self.samples_generator.generate_eval_samples(**eval_kwargs)
+        if self.args.train.rollout_dump_dir:
+            os.makedirs(self.args.train.rollout_dump_dir, exist_ok=True)
+            eval_dump_path = os.path.join(self.args.train.rollout_dump_dir, "eval_rollouts.pt")
+            torch.save(samples_list, eval_dump_path)
+            logger.info(f"[eval_rollout_dump] wrote {len(samples_list)} samples to {eval_dump_path}")
+            eval_trace_path = os.path.join(self.args.train.rollout_dump_dir, "eval_trace.jsonl")
+            with open(eval_trace_path, "w", encoding="utf-8") as trace_file:
+                for sample in samples_list:
+                    info = {}
+                    for key, value in (sample.info or {}).items():
+                        if hasattr(value, "item") and value.numel() == 1:
+                            value = value.item()
+                        info[key] = value
+                    trace_file.write(json.dumps({"prompt": sample.prompts[0], "label": sample.labels[0], "reward": sample.rewards.item() if sample.rewards is not None else None, "score": sample.scores.item() if sample.scores is not None else None, "response_length": sample.response_length.item(), "truncated": sample.truncated.item(), "info": info}, ensure_ascii=False, default=str) + "\n")
+            logger.info(f"[eval_trace] wrote {len(samples_list)} samples to {eval_trace_path}")
         return compute_eval_metrics(self.eval_dataloader, samples_list, eval_n)
 
     def run_eval_only(self) -> dict:

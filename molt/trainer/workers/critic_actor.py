@@ -380,7 +380,7 @@ class CriticModelActor(BaseModelActor):
             # its metric may have its _critic dir pruned).
             metric_value=metric_value,
             metric_key=metric_key,
-            optimizer=self.critic_optim,
-            scheduler=self.critic_scheduler,
+            optimizer=self.critic_optim if args.ckpt.save_optimizer else None,
+            scheduler=self.critic_scheduler if args.ckpt.save_optimizer else None,
         )
         torch_dist_barrier_and_cuda_sync()

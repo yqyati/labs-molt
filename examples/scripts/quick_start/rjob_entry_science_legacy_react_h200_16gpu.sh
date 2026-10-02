@@ -14,7 +14,7 @@ SCI_RESEARCH_ROOT="${SCI_RESEARCH_ROOT:-$GPFS2_ROOT/scientific_reasoning_and_res
 WHEEL_DIR="${QWEN_AGENT_WHEEL_DIR:-$SCI_RESEARCH_ROOT/yangqingyu/rft/offline_wheels/qwen_agent_py312_cp312_clean}"
 INSTALLER="${QWEN_AGENT_INSTALLER:-$SCI_RESEARCH_ROOT/yangqingyu/rft/offline_wheels/install_qwen_agent_offline.sh}"
 TRAIN_SCRIPT="${TRAIN_SCRIPT:-$REPO_ROOT/examples/scripts/quick_start/rl_science_legacy_react_h200_16gpu.sh}"
-SCIENCE_AGENT_ROOT="${SCIENCE_AGENT_ROOT:-$SCI_RESEARCH_ROOT/liuzhuo/science-agent}"
+SCIENCE_AGENT_ROOT="${SCIENCE_AGENT_ROOT:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/yangqingyu/workspace/harness/science-agent}"
 RJOB_NAME="${RJOB_NAME:-science-agent-async-training-test-16gpu}"
 MODEL_PATH="${MODEL_PATH:-$SCI_RESEARCH_ROOT/science_model/tool_models/hf_models/p1_rollout1_kimi2.6_subset_kimi_prompt_sft_qwen3.5_35b-0511-201941}"
 DATASET="${DATASET:-$SCI_RESEARCH_ROOT/yangqingyu/rft/molt_science_legacy/train.jsonl}"
@@ -52,7 +52,6 @@ fi
 export PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export MOLT_PATH="$REPO_ROOT" SCIENCE_AGENT_ROOT MODEL_PATH DATASET GPFS2_ROOT GPFS1_ROOT YANGQINGYU_MOUNT_ROOT GPFS1_USER_ROOT SCI_RESEARCH_ROOT SAVE_ROOT
 export PYTHONPATH="$REPO_ROOT:$SCIENCE_AGENT_ROOT:$SCIENCE_AGENT_ROOT/inference${PYTHONPATH:+:$PYTHONPATH}"
-
 echo "Installing qwen-agent from local wheels only: $WHEEL_DIR"
 PYTHON_BIN="$PYTHON_BIN" bash "$INSTALLER" "$WHEEL_DIR"
 "$PYTHON_BIN" - <<'PY'

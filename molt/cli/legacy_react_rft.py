@@ -22,7 +22,7 @@ import traceback
 from pathlib import Path
 
 
-DEFAULT_AGENT_ROOT = "/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/scientific_reasoning_and_research/liuzhuo/science-agent"
+DEFAULT_AGENT_ROOT = "/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/yangqingyu/workspace/harness/science-agent"
 
 
 def _load_legacy_agent(root: str):

@@ -27,14 +27,28 @@ N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-2}"
 ROLLOUT_VLLM_GENERATE_BATCH_SIZE="${ROLLOUT_VLLM_GENERATE_BATCH_SIZE:-$ROLLOUT_BATCH_SIZE}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-16}"
+# Full-vocabulary fp32 entropy can allocate tens of GiB on long trajectories.
+# Keep it disabled for this memory-bound run and fail fast on an override.
+ACTOR_ENTROPY_COEF="${ACTOR_ENTROPY_COEF:-0}"
+if [[ "$ACTOR_ENTROPY_COEF" != "0" && "$ACTOR_ENTROPY_COEF" != "0.0" ]]; then
+  echo "This long-context memory-bound run requires ACTOR_ENTROPY_COEF=0; refusing a full-vocab entropy allocation." >&2
+  exit 1
+fi
 
 export SCIENCE_AGENT_MODEL_PATH="$MODEL_PATH"
-export SCIENCE_AGENT_ROOT="${SCIENCE_AGENT_ROOT:-$SCI_RESEARCH_ROOT/liuzhuo/science-agent}"
+export SCIENCE_AGENT_ROOT="${SCIENCE_AGENT_ROOT:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/yangqingyu/workspace/harness/science-agent}"
 export SCIENCE_AGENT_GATEWAY_URL="${SCIENCE_AGENT_GATEWAY_URL:-http://100.102.21.127:8765}"
 export SCIENCE_AGENT_JUDGE_BASE_URL="${SCIENCE_AGENT_JUDGE_BASE_URL:-${SCIENCE_AGENT_GATEWAY_URL%/}/v1/judge}"
 export SCIENCE_AGENT_JUDGE_MODEL="${SCIENCE_AGENT_JUDGE_MODEL:-o3-mini}"
 export SCIENCE_AGENT_JUDGE_MAX_TOKENS="${SCIENCE_AGENT_JUDGE_MAX_TOKENS:-1800}"
 export SCIENCE_AGENT_TOOLS="${SCIENCE_AGENT_TOOLS:-search,visit,python,google_scholar}"
+export SCIENCE_AGENT_SEARCH_MAX_RESULTS="${SCIENCE_AGENT_SEARCH_MAX_RESULTS:-6}"
+export SCIENCE_AGENT_SEARCH_SNIPPET_CHARS="${SCIENCE_AGENT_SEARCH_SNIPPET_CHARS:-600}"
+export SCIENCE_AGENT_SCHOLAR_MAX_RESULTS="${SCIENCE_AGENT_SCHOLAR_MAX_RESULTS:-6}"
+export SCIENCE_AGENT_SCHOLAR_SNIPPET_CHARS="${SCIENCE_AGENT_SCHOLAR_SNIPPET_CHARS:-700}"
+export SCIENCE_AGENT_READ_PAGE_MAX_EVIDENCE_BLOCKS="${SCIENCE_AGENT_READ_PAGE_MAX_EVIDENCE_BLOCKS:-4}"
+export SCIENCE_AGENT_READ_PAGE_MODE="${SCIENCE_AGENT_READ_PAGE_MODE:-extractive}"
+export SCIENCE_AGENT_READ_PAGE_MAX_CHARS="${SCIENCE_AGENT_READ_PAGE_MAX_CHARS:-6000}"
 export NO_PROXY="${NO_PROXY:+$NO_PROXY,}100.102.21.127"
 export no_proxy="$NO_PROXY"
 export OPENAI_COMPAT_USE_SYSTEM_PROMPT=1 AGENT_TOOL_BACKEND=remote AGENT_EVAL_FORCE_FINALIZE=1
@@ -45,6 +59,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export MOLT_MOE_RESHARD_AFTER_FWD="${MOLT_MOE_RESHARD_AFTER_FWD:-1}"
 MAX_LEN="${MAX_LEN:-32768}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-4096}"
+export QWEN_API_MAX_OUTPUT_TOKENS="${QWEN_API_MAX_OUTPUT_TOKENS:-4096}"
 FSDP_OFFLOAD="${FSDP_OFFLOAD:-optimizer}"
 CKPT_SAVE_STEPS="${CKPT_SAVE_STEPS:-100}"
 
@@ -92,7 +107,7 @@ fi
 trap '[ "$STARTED_RAY" = "1" ] && "$RAY_BIN" stop --force >/dev/null 2>&1 || true' EXIT
 
 cd "$REPO_ROOT"
-echo "run=$RUN_NAME model=$MODEL_PATH dataset=$DATASET max_samples=$MAX_SAMPLES rollout_batch_size=$ROLLOUT_BATCH_SIZE rollout_vllm_generate_batch_size=$ROLLOUT_VLLM_GENERATE_BATCH_SIZE samples_per_prompt=$N_SAMPLES_PER_PROMPT train_batch_size=$TRAIN_BATCH_SIZE async_queue_size=2 routing_replay=1 reshard_after_fwd=$MOLT_MOE_RESHARD_AFTER_FWD ray_gpus=$RAY_NUM_GPUS actor_gpus=$ACTOR_GPUS_PER_NODE vllm_tp=$VLLM_TP_SIZE fsdp_ep=$FSDP_EP_SIZE policy_dp=2 ckpt_save_steps=$CKPT_SAVE_STEPS save_root=$SAVE_ROOT"
+echo "run=$RUN_NAME model=$MODEL_PATH dataset=$DATASET max_samples=$MAX_SAMPLES rollout_batch_size=$ROLLOUT_BATCH_SIZE rollout_vllm_generate_batch_size=$ROLLOUT_VLLM_GENERATE_BATCH_SIZE samples_per_prompt=$N_SAMPLES_PER_PROMPT train_batch_size=$TRAIN_BATCH_SIZE async_queue_size=2 routing_replay=1 partial_rollout=1 freeze_moe_router=1 reshard_after_fwd=$MOLT_MOE_RESHARD_AFTER_FWD ray_gpus=$RAY_NUM_GPUS actor_gpus=$ACTOR_GPUS_PER_NODE vllm_tp=$VLLM_TP_SIZE fsdp_ep=$FSDP_EP_SIZE policy_dp=2 ckpt_save_steps=$CKPT_SAVE_STEPS save_root=$SAVE_ROOT"
 python3 -u -m molt.cli.train_rl_ray \
   --actor.model_name_or_path "$MODEL_PATH" \
   --data.prompt_dataset "$DATASET" --data.input_key prompt --data.label_key science_item \
@@ -100,14 +115,14 @@ python3 -u -m molt.cli.train_rl_ray \
   --rollout.batch_size "$ROLLOUT_BATCH_SIZE" --rollout.vllm_generate_batch_size "$ROLLOUT_VLLM_GENERATE_BATCH_SIZE" --rollout.micro_batch_size 1 \
   --rollout.n_samples_per_prompt "$N_SAMPLES_PER_PROMPT" --rollout.max_new_tokens "$MAX_NEW_TOKENS" \
   --rollout.temperature 1.0 --rollout.top_p 1.0 --train.batch_size "$TRAIN_BATCH_SIZE" --train.micro_batch_size 1 --train.max_epochs 1 \
-  --train.num_episodes 1 --train.async_queue_size 2 --train.routing_replay --train.colocate_fsdp_models \
+  --train.num_episodes 1 --train.async_queue_size 2 --train.routing_replay --train.colocate_fsdp_models --train.partial_rollout_enable \
   --actor.num_nodes 1 --actor.num_gpus_per_node "$ACTOR_GPUS_PER_NODE" \
   --vllm.num_engines 1 --vllm.tensor_parallel_size "$VLLM_TP_SIZE" --vllm.sync_backend nccl \
   --vllm.enable_auto_tool_choice --vllm.tool_call_parser "${VLLM_TOOL_CALL_PARSER:-qwen3_coder}" \
   --vllm.gpu_memory_utilization 0.8 --vllm.distributed_executor_backend mp \
   --fsdp.param_dtype bf16 --fsdp.attn_implementation te --fsdp.tp_size 1 --fsdp.ep_size "$FSDP_EP_SIZE" --fsdp.cp_size 1 \
   --fsdp.offload "$FSDP_OFFLOAD" \
-  --actor.gradient_checkpoint full --actor.adam.lr 1e-6 --actor.eps_clip_low_high 0.2 0.27 --actor.dual_clip 10.0 \
+  --actor.gradient_checkpoint full --actor.freeze_moe_router --actor.adam.lr 1e-6 --actor.entropy_coef "$ACTOR_ENTROPY_COEF" --actor.eps_clip_low_high 0.2 0.27 --actor.dual_clip 10.0 \
   --algo.advantage.estimator reinforce_baseline --algo.advantage.is_correction_level geo \
   --train.force_on_policy \
   --algo.dynamic_filtering_enable --algo.dynamic_filtering_range -0.1 1.1 \
@@ -116,5 +131,6 @@ python3 -u -m molt.cli.train_rl_ray \
   --train.agent_path "$REPO_ROOT/examples/python/agents/science_legacy_react.py" \
   --ckpt.output_dir "$SAVE_ROOT/hf" \
   --ckpt.path "$SAVE_ROOT/state" \
-  --ckpt.save_steps "$CKPT_SAVE_STEPS" --logger.logging_steps 1 \
+  --ckpt.save_steps "$CKPT_SAVE_STEPS" --ckpt.max_num 0 --logger.logging_steps 1 \
+  --no-ckpt.save_optimizer \
   --logger.tensorboard_dir "$SAVE_ROOT/tensorboard"

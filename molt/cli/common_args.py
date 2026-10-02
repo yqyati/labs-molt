@@ -20,6 +20,7 @@ adds a flag and the SFT launcher silently keeps a stale default — exactly the
 ``--adam.lr`` vs ``--actor.adam.lr`` default skew this module now pins down.
 """
 
+import argparse
 from datetime import datetime
 
 
@@ -78,6 +79,12 @@ def add_ckpt_args(parser, default_ckpt_path: str) -> None:
     )
     parser.add_argument(
         "--ckpt.save_steps", type=int, default=-1, help="Save a resumable checkpoint every N steps; -1 disables it."
+    )
+    parser.add_argument(
+        "--ckpt.save_optimizer",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include optimizer/scheduler state in RL checkpoints (disable for model-only checkpoints).",
     )
     parser.add_argument(
         "--ckpt.save_hf",
