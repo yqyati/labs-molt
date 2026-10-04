@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# In-container RJob entrypoint for the 16-GPU async science RL run.
+# In-container RJob entrypoint: install the pinned agent dependency offline, then run Molt RL.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,12 +13,21 @@ SAVE_ROOT="${SAVE_ROOT:-$GPFS1_USER_ROOT/ckp}"
 SCI_RESEARCH_ROOT="${SCI_RESEARCH_ROOT:-$GPFS2_ROOT/scientific_reasoning_and_research}"
 WHEEL_DIR="${QWEN_AGENT_WHEEL_DIR:-$SCI_RESEARCH_ROOT/yangqingyu/rft/offline_wheels/qwen_agent_py312_cp312_clean}"
 INSTALLER="${QWEN_AGENT_INSTALLER:-$SCI_RESEARCH_ROOT/yangqingyu/rft/offline_wheels/install_qwen_agent_offline.sh}"
-TRAIN_SCRIPT="${TRAIN_SCRIPT:-$REPO_ROOT/examples/scripts/quick_start/rl_science_legacy_react_h200_16gpu.sh}"
+# Eight-H200 Qwen3.5-9B entrypoint: four GPUs for vLLM and four for policy.
+TRAIN_SCRIPT="${TRAIN_SCRIPT:-$REPO_ROOT/examples/scripts/quick_start/rl_science_legacy_react_qwen35_9b_h200_8gpu.sh}"
 SCIENCE_AGENT_ROOT="${SCIENCE_AGENT_ROOT:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/yangqingyu/workspace/harness/science-agent}"
-RJOB_NAME="${RJOB_NAME:-science-agent-async-training-test-16gpu}"
-MODEL_PATH="${MODEL_PATH:-$SCI_RESEARCH_ROOT/science_model/tool_models/hf_models/p1_rollout1_kimi2.6_subset_kimi_prompt_sft_qwen3.5_35b-0511-201941}"
+RJOB_NAME="${RJOB_NAME:-science-agent-qwen35-9b-rl-8gpu}"
+RUN_NAME="${RUN_NAME:-science_agent_qwen35_9b_rl_$(date +%Y%m%d_%H%M%S)}"
+NODE_LOG_SUFFIX="${NODE_RANK:-0}"
+LOG_ROOT="${SCIENCE_AGENT_LOG_ROOT:-$GPFS2_ROOT/yangqingyu/workspace/labs-molt/logs/$RJOB_NAME/$RUN_NAME}"
+mkdir -p "$LOG_ROOT"
+exec > >(tee -a "$LOG_ROOT/entrypoint_node${NODE_LOG_SUFFIX}.log") 2>&1
+
+MODEL_PATH="${MODEL_PATH:-$GPFS2_ROOT/yangqingyu/model/Qwen3.5-9B}"
 DATASET="${DATASET:-$SCI_RESEARCH_ROOT/yangqingyu/rft/molt_science_legacy/train.jsonl}"
 
+# The user's workspace and research share are separate GPFS mounts. A missing
+# path here is a submit-time mount mistake, not a pip/network issue.
 MISSING=0
 require_path() {
   local kind="$1" path="$2"
@@ -45,24 +54,30 @@ require_path dataset "$DATASET"
 require_path legacy_harness "$SCIENCE_AGENT_ROOT/inference/react_agent_openai_api_tools.py"
 require_path train_script "$TRAIN_SCRIPT"
 if (( MISSING )); then
-  echo "RJob preflight failed. Add the GPFS1/GPFS2 mounts above; training was not started." >&2
+  echo "RJob preflight failed. Add the GPFS1/GPFS2 mounts above; no dependency install or training was started." >&2
   exit 1
 fi
 
 export PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export MOLT_PATH="$REPO_ROOT" SCIENCE_AGENT_ROOT MODEL_PATH DATASET GPFS2_ROOT GPFS1_ROOT YANGQINGYU_MOUNT_ROOT GPFS1_USER_ROOT SCI_RESEARCH_ROOT SAVE_ROOT
 export PYTHONPATH="$REPO_ROOT:$SCIENCE_AGENT_ROOT:$SCIENCE_AGENT_ROOT/inference${PYTHONPATH:+:$PYTHONPATH}"
+export SCIENCE_AGENT_TRACE="${SCIENCE_AGENT_TRACE:-1}"
+export SCIENCE_AGENT_TRACE_FILE="${SCIENCE_AGENT_TRACE_FILE:-$LOG_ROOT/science_agent_trace_node${NODE_LOG_SUFFIX}.jsonl}"
+echo "RJob logs: $LOG_ROOT"
+echo "Entrypoint log: $LOG_ROOT/entrypoint_node${NODE_LOG_SUFFIX}.log"
+echo "Science-agent trace: $SCIENCE_AGENT_TRACE_FILE"
 echo "Installing qwen-agent from local wheels only: $WHEEL_DIR"
 PYTHON_BIN="$PYTHON_BIN" bash "$INSTALLER" "$WHEEL_DIR"
+
 "$PYTHON_BIN" - <<'PY'
 import qwen_agent
 from react_agent_openai_api_tools import MultiTurnReactAgent
+
 print(f"qwen-agent import ok: {qwen_agent.__file__}")
 print(f"Legacy ReAct import ok: {MultiTurnReactAgent.__module__}")
 PY
 
 cd "$REPO_ROOT"
-export RUN_NAME="${RUN_NAME:-science_agent_async_training_test_16gpu_$(date +%Y%m%d_%H%M%S)}"
 echo "rjob_name=$RJOB_NAME run_name=$RUN_NAME"
 echo "Starting training entrypoint: $TRAIN_SCRIPT"
 exec bash "$TRAIN_SCRIPT"
