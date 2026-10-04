@@ -168,3 +168,5 @@ checkpoints
 
 # local benchmark workspace (untracked; slated to move into .tmp)
 /bench/
+
+/science_agent_trace.jsonl
