@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import sys
+import json
 import types
 from collections import defaultdict
 from types import SimpleNamespace
@@ -185,6 +186,47 @@ def test_generate_eval_samples_defaults_to_rollout_batch_size(monkeypatch):
 
     assert len(samples) == 5
     assert dispatch_sizes == [2, 2, 1]
+
+
+def test_eval_persists_completed_task_before_next_result_fails(monkeypatch, tmp_path):
+    from molt.trainer.algorithm.experience import Experience
+
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(batch_size=2, n_samples_per_prompt=1),
+        eval=SimpleNamespace(batch_size=2),
+        train=SimpleNamespace(rollout_dump_dir=str(tmp_path)),
+    )
+    _wire_eval_generator(generator, monkeypatch, num_prompts=2)
+    sample = Experience(
+        prompts=["p0"], labels=[{"id": "q0"}], rewards=torch.tensor([1.0]), scores=torch.tensor([1.0]),
+        response_length=torch.tensor([3]), truncated=torch.tensor([False]),
+        info={"science_prediction": "42", "science_judge_valid": torch.tensor([1.0]),
+              "science_messages": '[{"role":"assistant","content":"42"}]'},
+        heavy_ref="runner-tensors",
+    )
+
+    def get_result(handle):
+        if handle == "runner-tensors":
+            return {"sequences": torch.tensor([[1, 2, 3]])}
+        if handle.group_id == "p0":
+            return [(sample, None)]
+        saved = torch.load(tmp_path / "eval_rollout_000000.pt", weights_only=False)
+        assert saved[0].heavy_ref is None
+        assert saved[0].sequences.tolist() == [[1, 2, 3]]
+        rows = [json.loads(line) for line in (tmp_path / "eval_trace.jsonl").read_text().splitlines()]
+        assert rows[0]["reward"] == 1.0
+        assert rows[0]["info"]["science_judge_valid"] == 1.0
+        assert rows[0]["info"]["science_prediction"] == "42"
+        raise RuntimeError("next task failed")
+
+    monkeypatch.setattr(samples_generator.ray, "get", get_result)
+    with pytest.raises(RuntimeError, match="next task failed"):
+        generator.generate_eval_samples()
+    assert sample.heavy_ref == "runner-tensors"
+    assert sample.sequences is None
+    assert generator._eval_dataloader_iter is None
+    assert len((tmp_path / "eval_trace.jsonl").read_text().splitlines()) == 1
 
 
 def test_generate_samples_pool_persists_across_calls(monkeypatch):

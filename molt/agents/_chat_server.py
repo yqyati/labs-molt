@@ -42,6 +42,8 @@ through the URL path prefix ``/s/<session_id>/v1`` that ``ChatAgentRunner`` buil
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -249,10 +251,23 @@ def _messages_to_chat(state: ChatServerState, messages: list) -> tuple[list, lis
     """OpenAI messages -> (ChatML rows with a literal ``<image>`` per image, loaded PIL images).
     Split the literal placeholder into structured content for models whose image token isn't
     ``<image>`` (Qwen-VL), so the template renders it — mirrors the RL dataset's rendering."""
+    preserve_tool_protocol = os.environ.get("AGENT_OBSERVATION_MASKING", "0").lower() in {"1", "true", "yes"}
     chat, pil_images = [], []
     for m in messages:
         text, imgs = _content_to_text_and_images(m.get("content"))
-        chat.append({"role": m.get("role"), "content": text})
+        row = {"role": m.get("role"), "content": text}
+        # Isolate masked-history rendering from the existing unmasked path.
+        if preserve_tool_protocol:
+            for key in ("tool_calls", "reasoning_content", "reasoning", "tool_call_id", "name"):
+                if m.get(key) is not None:
+                    row[key] = m[key]
+            if row.get("tool_calls"):
+                row["tool_calls"] = deepcopy(row["tool_calls"])
+                for call in row["tool_calls"]:
+                    function = call.get("function", call)
+                    if isinstance(function.get("arguments"), str):
+                        function["arguments"] = json.loads(function["arguments"])
+        chat.append(row)
         pil_images.extend(imgs)
     if state.expand_image_placeholder:
         chat = [split_image_placeholder(m) for m in chat]

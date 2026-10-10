@@ -17,6 +17,7 @@
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
 import copy
+import json
 import os
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -177,6 +178,11 @@ class SamplesGenerator:
         drop_counts: Dict[str, int] = defaultdict(int)
         exhausted = False
         progress = tqdm(total=len(self.eval_dataloader), desc="Generate eval samples")
+        dump_dir = getattr(getattr(self.args, "train", None), "rollout_dump_dir", None)
+        trace_file = None
+        if dump_dir:
+            os.makedirs(dump_dir, exist_ok=True)
+            trace_file = open(os.path.join(dump_dir, "eval_trace.jsonl"), "w", encoding="utf-8")
         try:
             while not exhausted or pending_refs:
                 free_slots = eval_batch_size - len(pending_refs)
@@ -194,11 +200,32 @@ class SamplesGenerator:
                     break
                 ready_refs, pending_refs = ray.wait(pending_refs, num_returns=1, timeout=10.0)
                 for ref in ready_refs:
-                    all_experiences.extend(
-                        self._filter_group(ref, False, drop_counts, **generate_kwargs)
-                    )
+                    finished = self._filter_group(ref, False, drop_counts, **generate_kwargs)
+                    if trace_file is not None and finished:
+                        # Persist local tensors, not Ray refs that die with their runner.
+                        local = [copy.copy(sample).reload() for sample in finished]
+                        dump_path = os.path.join(dump_dir, f"eval_rollout_{len(all_experiences):06d}.pt")
+                        with open(dump_path, "wb") as tensor_file:
+                            torch.save(local, tensor_file)
+                            tensor_file.flush()
+                            os.fsync(tensor_file.fileno())
+                        for sample in finished:
+                            info = {key: _to_scalar(value) if isinstance(value, torch.Tensor) and value.numel() == 1 else value
+                                    for key, value in (sample.info or {}).items()}
+                            trace_file.write(json.dumps({
+                                "prompt": sample.prompts[0], "label": sample.labels[0],
+                                "reward": _to_scalar(sample.rewards), "score": _to_scalar(sample.scores),
+                                "response_length": _to_scalar(sample.response_length), "truncated": _to_scalar(sample.truncated),
+                                "info": info,
+                            }, ensure_ascii=False, default=str) + "\n")
+                        trace_file.flush()
+                        os.fsync(trace_file.fileno())
+                        logger.info(f"[eval_rollout_dump] saved {len(finished)} completed samples to {dump_path}")
+                    all_experiences.extend(finished)
                     progress.update(1)
         finally:
+            if trace_file is not None:
+                trace_file.close()
             progress.close()
             self._eval_dataloader_iter = None
         if drop_counts:

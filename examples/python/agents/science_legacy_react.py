@@ -12,7 +12,6 @@ import asyncio
 import importlib
 import json
 import os
-import random
 import re
 import sys
 from pathlib import Path
@@ -122,9 +121,9 @@ class ScienceLegacyReactAgent(ChatAgent):
         prediction_missing = isinstance(result, dict) and "prediction" not in result
         prediction_empty = not prediction.strip()
         truncated = bool(result.get("truncated")) if isinstance(result, dict) else False
-        if next_protocol and prediction_empty and not truncated:
-            # An empty HLE candidate is unanswerable. Sending the reference to
-            # the judge with an empty candidate can produce false positives.
+        if prediction_empty:
+            # An empty candidate is unanswerable. Sending the reference to the
+            # judge with an empty candidate can produce false positives.
             return Result(
                 reward=torch.tensor(0.0, dtype=torch.float32),
                 score=torch.tensor(0.0, dtype=torch.float32),
@@ -143,42 +142,6 @@ class ScienceLegacyReactAgent(ChatAgent):
                     "science_termination": result.get("termination", "") if isinstance(result, dict) else "",
                     "science_prediction": "",
                     "science_messages": json.dumps(result.get("messages", []) if isinstance(result, dict) else [], ensure_ascii=False, default=str),
-                },
-            )
-        if truncated:
-            tool_calls = sum(
-                len(message.get("tool_calls") or [])
-                for message in (result.get("messages", []) if isinstance(result, dict) else [])
-                if isinstance(message, dict)
-            )
-            # Debug-only reward probe: truncated trajectories used to receive
-            # an unconditional zero, making an entire batch have zero
-            # advantage. Give them a random score in [0.3, 0.7] so we can
-            # distinguish the reward-collapse path from the distributed
-            # training/collective path. Keep reward and score identical.
-            truncated_reward = random.uniform(0.3, 0.7)
-            logger.warning(
-                "Science truncated reward debug: reward=%.6f prediction_chars=%d tool_calls=%d",
-                truncated_reward,
-                len(prediction),
-                tool_calls,
-            )
-            return Result(
-                reward=torch.tensor(truncated_reward, dtype=torch.float32),
-                score=torch.tensor(truncated_reward, dtype=torch.float32),
-                truncated=True,
-                info={
-                    "science_judge_score": torch.tensor(truncated_reward, dtype=torch.float32),
-                    "science_judge_valid": torch.tensor(0.0, dtype=torch.float32),
-                    "science_judge_skipped_truncated": torch.tensor(1.0, dtype=torch.float32),
-                    "science_prediction_chars": torch.tensor(float(len(prediction)), dtype=torch.float32),
-                    "science_prediction_missing": torch.tensor(float(prediction_missing), dtype=torch.float32),
-                    "science_prediction_empty": torch.tensor(float(prediction_empty), dtype=torch.float32),
-                    "science_tool_calls": torch.tensor(float(tool_calls), dtype=torch.float32),
-                    "science_truncated": torch.tensor(1.0, dtype=torch.float32),
-                    "science_termination": result.get("termination", "truncated response"),
-                    "science_prediction": prediction,
-                    "science_messages": json.dumps(result.get("messages", []), ensure_ascii=False, default=str),
                 },
             )
         reward_mode = os.environ.get("SCIENCE_AGENT_REWARD_MODE", "judge").strip().lower()

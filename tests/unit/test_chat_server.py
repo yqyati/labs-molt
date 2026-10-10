@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import copy
 from types import SimpleNamespace
 
 import numpy as np
@@ -289,6 +290,34 @@ def test_compaction_starts_a_fresh_segment():
     assert len(out) == 2 and all(t.reward == 1.0 and t.scores == 0.5 for t in out)
     # The agent's cut ends the episode: only the last segment is truncated, the first was complete.
     assert [t.truncated for t in out] == [False, True]
+
+
+@pytest.mark.parametrize("masking", [None, "0", "1"])
+def test_masked_history_rerender_preserves_tool_protocol(monkeypatch, masking):
+    if masking is None:
+        monkeypatch.delenv("AGENT_OBSERVATION_MASKING", raising=False)
+    else:
+        monkeypatch.setenv("AGENT_OBSERVATION_MASKING", masking)
+    state, _ = _state([])
+    messages = [
+        {"role": "user", "content": "Q"},
+        {"role": "assistant", "content": "", "reasoning_content": "Compute",
+         "tool_calls": [{"id": "call1", "type": "function",
+                         "function": {"name": "python", "arguments": '{"code":"1+1"}'}}]},
+        {"role": "tool", "tool_call_id": "call1", "name": "python", "content": "2"},
+    ]
+    masked = copy.deepcopy(messages)
+    masked[2]["content"] = "<MASKED>"
+    masked.extend([{"role": "assistant", "content": "A"}, {"role": "user", "content": "Continue"}])
+    rendered, images = cs._messages_to_chat(state, masked)
+    expected = copy.deepcopy(masked)
+    expected[1]["tool_calls"][0]["function"]["arguments"] = {"code": "1+1"}
+    if masking != "1":
+        expected = [{"role": m["role"], "content": m["content"]} for m in masked]
+    assert rendered == expected
+    assert masked[1]["tool_calls"][0]["function"]["arguments"] == '{"code":"1+1"}'
+    assert messages[2]["content"] == "2"
+    assert images == []
 
 
 def test_template_rewritten_history_starts_fresh_segment():
