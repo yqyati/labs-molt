@@ -287,7 +287,7 @@ class ScienceLegacyReactAgent(ChatAgent):
                 )
                 if attempt < 2:
                     await asyncio.sleep(2**attempt)
-        reward = float(judge_result["score"]) if judge_result is not None else -10.0
+        reward = float(judge_result["score"]) if judge_result is not None else 0.0
         filter_score = reward if judge_result is not None else -1e9
         tool_calls = sum(
             len(message.get("tool_calls") or [])

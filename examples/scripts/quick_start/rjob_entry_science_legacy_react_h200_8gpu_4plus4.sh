@@ -9,7 +9,6 @@ GPFS2_ROOT="${GPFS2_ROOT:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2}"
 GPFS1_ROOT="${GPFS1_ROOT:-/mnt/shared-storage-user/ai4sgi-gpfs1}"
 YANGQINGYU_MOUNT_ROOT="${YANGQINGYU_MOUNT_ROOT:-$GPFS2_ROOT/yangqingyu}"
 GPFS1_USER_ROOT="${GPFS1_USER_ROOT:-$GPFS1_ROOT/yangqingyu}"
-SAVE_ROOT="${SAVE_ROOT:-$GPFS1_USER_ROOT/ckp}"
 SCI_RESEARCH_ROOT="${SCI_RESEARCH_ROOT:-$GPFS2_ROOT/scientific_reasoning_and_research}"
 WHEEL_DIR="${QWEN_AGENT_WHEEL_DIR:-$SCI_RESEARCH_ROOT/yangqingyu/rft/offline_wheels/qwen_agent_py312_cp312_clean}"
 INSTALLER="${QWEN_AGENT_INSTALLER:-$SCI_RESEARCH_ROOT/yangqingyu/rft/offline_wheels/install_qwen_agent_offline.sh}"
@@ -44,7 +43,7 @@ require_path train_script "$TRAIN_SCRIPT"
 
 export PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export MOLT_PATH="$REPO_ROOT" SCIENCE_AGENT_ROOT MODEL_PATH DATASET GPFS2_ROOT GPFS1_ROOT
-export YANGQINGYU_MOUNT_ROOT GPFS1_USER_ROOT SCI_RESEARCH_ROOT SAVE_ROOT
+export YANGQINGYU_MOUNT_ROOT GPFS1_USER_ROOT SCI_RESEARCH_ROOT
 export PYTHONPATH="$REPO_ROOT:$SCIENCE_AGENT_ROOT:$SCIENCE_AGENT_ROOT/inference${PYTHONPATH:+:$PYTHONPATH}"
 
 echo "Installing qwen-agent from local wheels only: $WHEEL_DIR"
@@ -58,5 +57,5 @@ PY
 
 cd "$REPO_ROOT"
 export RUN_NAME="${RUN_NAME:-science_agent_async_training_8gpu_4plus4_$(date +%Y%m%d_%H%M%S)}"
-echo "rjob_name=$RJOB_NAME run_name=$RUN_NAME layout=rollout4+policy4 ep=4 cp=2 max_len=32000 train_max_tokens_per_gpu=17000 dispatcher=hybridep"
+echo "rjob_name=$RJOB_NAME run_name=$RUN_NAME train_script=$TRAIN_SCRIPT"
 exec bash "$TRAIN_SCRIPT"

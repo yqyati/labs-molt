@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the isolated HLE-100 Sandbox evaluation through Molt rollout.
+# Run an isolated HLE subset Sandbox evaluation through Molt rollout.
 set -euo pipefail
 
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/yangqingyu/workspace}"
@@ -12,8 +12,10 @@ WHEEL_DIR="${QWEN_AGENT_WHEEL_DIR:-$SCI_RESEARCH_ROOT/yangqingyu/rft/offline_whe
 INSTALLER="${QWEN_AGENT_INSTALLER:-$SCI_RESEARCH_ROOT/yangqingyu/rft/offline_wheels/install_qwen_agent_offline.sh}"
 MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to an HF model or consolidated Molt checkpoint directory}"
 HLE_SOURCE="${HLE_SOURCE:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/scientific_reasoning_and_research/yangqingyu/science-agent-next/data/hle_subsets/HLE_all_short_100.jsonl}"
+HLE_EXPECTED_ROWS="${HLE_EXPECTED_ROWS:-100}"
+HLE_DATASET_NAME="${HLE_DATASET_NAME:-hle_all_mini_100}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/yangqingyu/eval/molt_hle100_sandbox/$(date +%Y%m%d-%H%M%S)}"
-EVAL_DATASET="${EVAL_DATASET:-$OUTPUT_ROOT/hle100_molt.jsonl}"
+EVAL_DATASET="${EVAL_DATASET:-$OUTPUT_ROOT/hle${HLE_EXPECTED_ROWS}_molt.jsonl}"
 CONVERT_ROOT="${CONVERT_ROOT:-$OUTPUT_ROOT/hf_model}"
 BASE_MODEL_PATH="${BASE_MODEL_PATH:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/scientific_reasoning_and_research/science_model/tool_models/hf_models/p1_rollout1_kimi2.6_subset_kimi_prompt_sft_qwen3.5_35b-0511-201941}"
 
@@ -35,7 +37,7 @@ test -f "$HARNESS_ROOT/inference/react_agent_openai_api_tools.py" || {
 }
 test -d "$WHEEL_DIR" || { echo "Missing offline qwen-agent wheels: $WHEEL_DIR" >&2; exit 1; }
 test -f "$INSTALLER" || { echo "Missing qwen-agent installer: $INSTALLER" >&2; exit 1; }
-test -f "$HLE_SOURCE" || { echo "Missing HLE-100 source: $HLE_SOURCE" >&2; exit 1; }
+test -f "$HLE_SOURCE" || { echo "Missing HLE source: $HLE_SOURCE" >&2; exit 1; }
 test -f "$MODEL_PATH/config.json" || test -f "$MODEL_PATH/.hf_metadata/config.json" || {
   echo "MODEL_PATH must be an HF model or Molt actor checkpoint: $MODEL_PATH" >&2
   exit 1
@@ -68,19 +70,45 @@ prepare_model() {
     printf '%s\n' "$converted"
     return
   fi
-  local tool="${CONSOLIDATION_TOOL:-/opt/automodel/tools/offline_hf_consolidation.py}"
-  test -f "$tool" || {
-    echo "Missing AutoModel consolidation tool: $tool; set CONSOLIDATION_TOOL" >&2
-    exit 1
-  }
   test -f "$BASE_MODEL_PATH/config.json" || {
     echo "Missing base model: $BASE_MODEL_PATH" >&2
     exit 1
   }
   mkdir -p "$converted"
   echo "Consolidating Molt checkpoint $MODEL_PATH -> $converted" >&2
-  python3 "$tool" --backend gloo --num-threads "${CONSOLIDATION_THREADS:-8}" \
-    --model-name "$BASE_MODEL_PATH" --input-dir "$MODEL_PATH" --output-dir "$converted"
+  if [[ -n "${CONSOLIDATION_TOOL:-}" ]]; then
+    python3 "$CONSOLIDATION_TOOL" --backend gloo --num-threads "${CONSOLIDATION_THREADS:-8}" \
+      --model-name "$BASE_MODEL_PATH" --input-dir "$MODEL_PATH" --output-dir "$converted" >&2
+  else
+    # Runtime images include the consolidation library without the repository CLI.
+    python3 - "$MODEL_PATH" "$converted" "${CONSOLIDATION_THREADS:-8}" <<'PY' >&2
+import json
+import shutil
+import sys
+from pathlib import Path
+
+import torch
+from nemo_automodel.components.checkpoint._backports.consolidate_hf_safetensors import consolidate_safetensors_files
+
+source, target = map(Path, sys.argv[1:3])
+metadata = source / ".hf_metadata"
+consolidate_safetensors_files(
+    str(source), str(target),
+    json.loads((metadata / "fqn_to_file_index_mapping.json").read_text()),
+    num_threads=int(sys.argv[3]), cast_dtype=torch.bfloat16,
+    fqn_to_dtype_mapping=json.loads((metadata / "fqn_to_dtype_mapping.json").read_text()),
+)
+config = json.loads((metadata / "config.json").read_text())
+for section in (config, config.get("text_config", {}), config.get("vision_config", {})):
+    section["dtype"] = "bfloat16"
+    section.pop("torch_dtype", None)
+if (metadata / "generation_config.json").exists():
+    shutil.copy2(metadata / "generation_config.json", target)
+# Publish config last so an interrupted conversion is not mistaken for an HF model.
+(target / "config.json").write_text(json.dumps(config, indent=2) + "\n")
+print(f"Consolidated checkpoint: {target}")
+PY
+  fi
   local f
   for f in tokenizer.json tokenizer_config.json special_tokens_map.json \
            chat_template.jinja preprocessor_config.json processor_config.json; do
@@ -102,9 +130,10 @@ python3 -u "$HARNESS_ROOT/sandbox_smoke.py" --llm --search --judge --page-file -
 SERVE_MODEL_PATH="$(prepare_model)"
 
 # Convert HLE rows to the exact schema consumed by Molt's science adapter.
-python3 - "$HLE_SOURCE" "$EVAL_DATASET" <<'PY'
+python3 - "$HLE_SOURCE" "$EVAL_DATASET" "$HLE_EXPECTED_ROWS" "$HLE_DATASET_NAME" <<'PY'
 import json, pathlib, sys
-src, dst = map(pathlib.Path, sys.argv[1:])
+src, dst = map(pathlib.Path, sys.argv[1:3])
+expected_rows, dataset_name = int(sys.argv[3]), sys.argv[4]
 count = 0
 with src.open(encoding="utf-8") as inp, dst.open("w", encoding="utf-8") as out:
     for line in inp:
@@ -115,21 +144,21 @@ with src.open(encoding="utf-8") as inp, dst.open("w", encoding="utf-8") as out:
         answer = row.get("answer") or row.get("ground_truth") or row.get("target") or ""
         if not question:
             raise SystemExit(f"HLE row has no question: {row.keys()}")
-        item_id = row.get("id") or row.get("question_id") or f"hle100-{count:04d}"
+        item_id = row.get("id") or row.get("question_id") or row.get("task_id") or f"hle{expected_rows}-{count:04d}"
         item = dict(row)
         item["question_id"] = item.get("question_id") or item_id
         item["answer"] = answer
-        item["source"] = item.get("source") or "hle_all_mini_100"
+        item["source"] = item.get("source") or dataset_name
         out.write(json.dumps({
             "prompt": [{"role": "user", "content": str(question)}],
             "answer": str(answer),
             "science_item": item,
             "id": str(item_id),
-            "datasource": "hle_all_mini_100",
+            "datasource": dataset_name,
         }, ensure_ascii=False) + "\n")
         count += 1
-if count != 100:
-    raise SystemExit(f"Expected 100 Sandbox evaluation rows, found {count}")
+if count != expected_rows:
+    raise SystemExit(f"Expected {expected_rows} Sandbox evaluation rows, found {count}")
 print(f"prepared {count} rows: {dst}")
 PY
 
@@ -162,7 +191,7 @@ export no_proxy="$NO_PROXY"
 export WANDB_DISABLED=true RAY_USAGE_STATS_ENABLED=0 VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 cd "$MOLT_REPO"
-echo "Molt HLE-100 eval: model=$SERVE_MODEL_PATH dataset=$EVAL_DATASET output=$OUTPUT_ROOT tp=$TP workers=$MAX_WORKERS" >&2
+echo "Molt HLE eval: name=$HLE_DATASET_NAME rows=$HLE_EXPECTED_ROWS model=$SERVE_MODEL_PATH dataset=$EVAL_DATASET output=$OUTPUT_ROOT tp=$TP workers=$MAX_WORKERS" >&2
 python3 -u -m molt.cli.train_rl_ray \
   --actor.model_name_or_path "$SERVE_MODEL_PATH" \
   --data.prompt_dataset "$EVAL_DATASET" \
@@ -170,6 +199,7 @@ python3 -u -m molt.cli.train_rl_ray \
   --data.label_key science_item \
   --data.apply_chat_template \
   --data.max_len "$MAX_MODEL_LEN" \
+  --data.max_images_per_prompt "${MAX_IMAGES_PER_PROMPT:-0}" \
   --data.dataloader_num_workers 0 \
   --rollout.batch_size "$MAX_WORKERS" \
   --rollout.n_samples_per_prompt 1 \

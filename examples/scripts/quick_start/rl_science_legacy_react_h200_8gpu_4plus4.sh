@@ -19,7 +19,13 @@ SAVE_ROOT="${SAVE_ROOT:-$RUN_ROOT/checkpoint}"
 MAX_SAMPLES="${MAX_SAMPLES:-3000}"
 
 mkdir -p "$LOG_ROOT" "$SAVE_ROOT"
+# Reserve the state directory so reruns cannot overwrite existing checkpoints.
+if [[ "${NODE_RANK:-0}" == "0" ]] && ! mkdir "$SAVE_ROOT/state"; then
+  echo "Cannot create a fresh checkpoint directory: $SAVE_ROOT/state. Choose a new SAVE_ROOT." >&2
+  exit 1
+fi
 exec > >(tee -a "$LOG_ROOT/entrypoint.log") 2>&1
+echo "checkpoint_root=$SAVE_ROOT"
 
 RAY_NUM_GPUS=8
 ACTOR_GPUS_PER_NODE=4
