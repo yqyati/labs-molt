@@ -63,11 +63,16 @@ class VllmRouterActor:
             return s.getsockname()[1]
 
     def __init__(self, worker_urls, *, policy="consistent_hash", port=None, max_payload_mb=512):
+        import os
         import subprocess
         import sys
 
         self._host = ray.util.get_node_ip_address()
         self._port = port or self._free_port(self._host)
+        env = os.environ.copy()
+        # The router emits per-request consistent-hash diagnostics at INFO.
+        # Keep warnings and errors; an explicit RUST_LOG can restore the details.
+        env.setdefault("RUST_LOG", "vllm_router_rs=info,vllm_router_rs::policies::consistent_hash=warn")
         self._proc = subprocess.Popen(
             [
                 sys.executable,
@@ -87,7 +92,8 @@ class VllmRouterActor:
                 str(max_payload_mb * 1024 * 1024),  # token-id / embed payloads are large
                 "--worker-urls",
                 *[str(u) for u in worker_urls],
-            ]
+            ],
+            env=env,
         )
 
     def url(self):

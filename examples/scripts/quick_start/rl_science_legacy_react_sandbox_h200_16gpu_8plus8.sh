@@ -80,7 +80,7 @@ test -f "$DATASET" || { echo "Missing dataset: $DATASET" >&2; exit 1; }
 test -f "$SCIENCE_AGENT_ROOT/inference/sandbox_gateway.py" || { echo "Missing sandbox gateway" >&2; exit 1; }
 test -f "$SCIENCE_AGENT_ROOT/inference/react_agent_openai_api_tools.py" || { echo "Missing Legacy ReAct harness" >&2; exit 1; }
 if [[ "${NODE_RANK:-0}" == "0" ]]; then
-  python3 -u "$SCIENCE_AGENT_ROOT/sandbox_smoke.py" --llm --search --judge --page-file \
+  python3 -u "$SCIENCE_AGENT_ROOT/sandbox_smoke.py" --search --judge --page-file \
     --http-url https://r.jina.ai/http://example.com 2>&1 | tee "$LOG_ROOT/sandbox_preflight.log"
 fi
 

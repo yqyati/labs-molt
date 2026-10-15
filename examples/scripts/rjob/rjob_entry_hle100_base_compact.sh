@@ -6,6 +6,6 @@ MODEL_PATH="/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/scientific_reasoning_and_rese
 export MODEL_PATH MODEL_NAME=base_context_compact
 export OUTPUT_ROOT=/mnt/shared-storage-user/ai4sgi-gpfs1/yangqingyu/eval/molt_hle100/base_context_compact
 export CONVERT_ROOT=/mnt/shared-storage-user/ai4sgi-gpfs1/yangqingyu/eval/molt_hle100/base_context_compact/hf_model
-export TP=4 MAX_WORKERS=8
+export TP=4 MAX_WORKERS="${MAX_WORKERS:-16}"
 export AGENT_CONTEXT_COMPACTION=1 AGENT_OBSERVATION_MASKING=0
 exec bash "$REPO_ROOT/evl/eval_molt_hle100_rollout.sh"

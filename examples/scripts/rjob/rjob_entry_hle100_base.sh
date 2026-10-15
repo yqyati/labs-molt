@@ -6,7 +6,7 @@ MODEL_PATH="/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/scientific_reasoning_and_rese
 export MODEL_PATH MODEL_NAME=base
 export OUTPUT_ROOT=/mnt/shared-storage-user/ai4sgi-gpfs1/yangqingyu/eval/molt_hle100/base
 export CONVERT_ROOT=/mnt/shared-storage-user/ai4sgi-gpfs1/yangqingyu/eval/molt_hle100/base/hf_model
-export TP=4 MAX_WORKERS=8
+export TP=4 MAX_WORKERS="${MAX_WORKERS:-16}"
 export MAX_NEW_TOKENS=8192 MAX_MODEL_LEN=98304
 export SCIENCE_TRAJECTORY_MAX_TOKENS=65536
 export AGENT_CONTEXT_COMPACTION=0 AGENT_OBSERVATION_MASKING=0 AGENT_OBSERVATION_MASKING_WINDOW=5

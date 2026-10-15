@@ -70,7 +70,7 @@ from molt.trainer.rollout.samples_generator import SamplesGenerator
 
 
 def _sample(group_id):
-    return SimpleNamespace(group_ids=[group_id])
+    return SimpleNamespace(group_ids=[group_id], total_length=None)
 
 
 def _prompt_loader(num_prompts):
@@ -117,8 +117,8 @@ def test_generate_samples_returns_batch_as_rollouts_finish_and_keeps_pool_satura
     assert prompts_dispatched == 7
     assert [handle.group_id for handle in generator._inflight_rollouts] == ["p3", "p4", "p5", "p6"]
     assert generator._finished_samples == []
-    # No drops and no dynamic filtering → no rollout metrics emitted.
-    assert rollout_metrics == {}
+    # No drops; these lightweight fixtures contain no token-length measurements.
+    assert rollout_metrics == {"rollout/length_stats_sample_count": 0.0}
     assert exhausted is False
 
 
@@ -185,7 +185,7 @@ def test_generate_eval_samples_defaults_to_rollout_batch_size(monkeypatch):
     samples = generator.generate_eval_samples()
 
     assert len(samples) == 5
-    assert dispatch_sizes == [2, 2, 1]
+    assert dispatch_sizes == [2, 1, 1, 1]
 
 
 def test_eval_persists_completed_task_before_next_result_fails(monkeypatch, tmp_path):
@@ -365,7 +365,7 @@ def test_generate_samples_drops_filtered_groups_and_refills_their_slots(monkeypa
     group_score = {"p0": 0.5, "p1": 1.0, "p2": 0.5, "p3": 0.5}
 
     def scored_sample(group_id):
-        return SimpleNamespace(group_ids=[group_id], scores=[torch.tensor(group_score[group_id])])
+        return SimpleNamespace(group_ids=[group_id], scores=[torch.tensor(group_score[group_id])], total_length=None)
 
     _wire_fake_vllm(generator, monkeypatch, scored_sample)
 
@@ -400,6 +400,65 @@ def test_dynamic_filtering_counts_compaction_segments_once_per_rollout(monkeypat
 
     assert kept == samples
     assert dict(score_stats) == {"score_sum": 1.0, "score_n": 2, "groups": 1.0, "all_pass": 0.0, "all_fail": 0.0}
+
+
+@pytest.mark.parametrize("dynamic_filtering", [False, True])
+def test_failed_judge_drops_entire_training_group_before_score_stats(monkeypatch, dynamic_filtering):
+    generator = object.__new__(SamplesGenerator)
+    samples = [SimpleNamespace(rewards=torch.tensor([reward]), info={"science_judge_valid": torch.tensor([valid])})
+               for reward, valid in [(1.0, 1), (-1.0, 0), (-1.0, 0), (0.0, 1)]]
+    monkeypatch.setattr(samples_generator.ray, "get", lambda _: [(s, None) for s in samples])
+    drops, stats = defaultdict(int), defaultdict(float)
+    assert generator._filter_group(object(), dynamic_filtering, drops, score_stats=stats) == []
+    assert drops == {"invalid_reward": 4}
+    assert not stats
+
+
+def test_eval_keeps_failed_judge_as_zero_with_error_diagnostics(monkeypatch):
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(rollout=SimpleNamespace(batch_size=1), eval=SimpleNamespace(batch_size=1))
+    _wire_eval_generator(generator, monkeypatch, num_prompts=1)
+    failed = SimpleNamespace(rewards=torch.tensor([-1.0]), scores=torch.tensor([-1.0]),
+                             info={"science_judge_valid": torch.tensor([0.0]), "science_judge_error": "HTTP 599"})
+    monkeypatch.setattr(samples_generator.ray, "get", lambda _: [(failed, None)])
+    assert generator.generate_eval_samples() == [failed]
+    assert failed.rewards.item() == failed.scores.item() == 0
+    assert failed.info["reward"].item() == failed.info["score"].item() == 0
+    assert failed.info["science_judge_valid"].item() == 0
+    assert failed.info["science_judge_error"] == "HTTP 599"
+
+
+def test_valid_zero_and_other_agents_negative_rewards_are_not_invalid(monkeypatch):
+    generator = object.__new__(SamplesGenerator)
+    samples = [SimpleNamespace(rewards=torch.tensor([reward]), info=info)
+               for reward, info in [(0.0, {"science_judge_valid": 1}),
+                                    (0.0, {"science_judge_valid": 0, "science_judge_skipped_empty": 1}),
+                                    (-1.0, {})]]
+    monkeypatch.setattr(samples_generator.ray, "get", lambda _: [(s, None) for s in samples])
+    drops = defaultdict(int)
+    assert generator._filter_group(object(), False, drops) == samples
+    assert not drops
+
+
+def test_training_refills_failed_judge_even_without_dynamic_filtering(monkeypatch):
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(batch_size=2, n_samples_per_prompt=1, vllm_generate_batch_size=2),
+        algo=SimpleNamespace(dynamic_filtering_enable=False),
+        actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
+        fsdp=SimpleNamespace(cp_size=1, tp_size=1),
+    )
+    generator.prompts_dataloader = _prompt_loader(3)
+
+    def sample(group_id):
+        return SimpleNamespace(group_ids=[group_id], total_length=None,
+                               rewards=torch.tensor([-1.0 if group_id == "p0" else 0.0]),
+                               info={"science_judge_valid": float(group_id != "p0")})
+
+    _wire_fake_vllm(generator, monkeypatch, sample)
+    samples, metrics, _, _ = generator.generate_samples()
+    assert [s.group_ids[0] for s in samples] == ["p1", "p2"]
+    assert metrics["rollout/dropped/invalid_reward"] == 1
 
 
 def test_process_response_preserves_text_info_through_replay_buffer_append():

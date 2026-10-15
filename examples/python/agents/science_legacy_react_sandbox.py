@@ -287,8 +287,8 @@ class ScienceLegacyReactAgent(ChatAgent):
                 )
                 if attempt < 2:
                     await asyncio.sleep(2**attempt)
-        reward = float(judge_result["score"]) if judge_result is not None else 0.0
-        filter_score = reward if judge_result is not None else -1e9
+        # -1 means ungraded: training rejects it; evaluation counts it as zero.
+        reward = float(judge_result["score"]) if judge_result is not None else -1.0
         tool_calls = sum(
             len(message.get("tool_calls") or [])
             for message in (result.get("messages", []) if isinstance(result, dict) else [])
@@ -297,7 +297,7 @@ class ScienceLegacyReactAgent(ChatAgent):
         return Result(
             truncated=truncated,
             reward=torch.tensor(reward, dtype=torch.float32),
-            score=torch.tensor(filter_score, dtype=torch.float32),
+            score=torch.tensor(reward, dtype=torch.float32),
             info={
                 **truncation_info,
                 "science_judge_score": torch.tensor(reward, dtype=torch.float32),

@@ -200,7 +200,7 @@ class SamplesGenerator:
                     break
                 ready_refs, pending_refs = ray.wait(pending_refs, num_returns=1, timeout=10.0)
                 for ref in ready_refs:
-                    finished = self._filter_group(ref, False, drop_counts, **generate_kwargs)
+                    finished = self._filter_group(ref, False, drop_counts, is_eval=True, **generate_kwargs)
                     if trace_file is not None and finished:
                         # Persist local tensors, not Ray refs that die with their runner.
                         local = [copy.copy(sample).reload() for sample in finished]
@@ -421,6 +421,8 @@ class SamplesGenerator:
         dynamic_filtering: bool,
         drop_counts: Dict[str, int],
         score_stats: Dict[str, float] | None = None,
+        *,
+        is_eval: bool = False,
         **generate_kwargs,
     ) -> List[Experience]:
         """Filter one finished rollout (a prompt's N responses = one group) down to
@@ -442,6 +444,23 @@ class SamplesGenerator:
                 group_samples.append(experience)
             elif drop_reason is not None:
                 drop_counts[drop_reason] += 1
+
+        # Science judge failures use -1, distinct from a valid incorrect answer.
+        # Drop complete training groups before statistics/relative advantages;
+        # retain eval questions as zero while preserving judge-error diagnostics.
+        invalid_rewards = [s for s in group_samples
+                           if _to_scalar((getattr(s, "info", None) or {}).get("science_judge_valid")) == 0
+                           and _to_scalar(getattr(s, "rewards", None)) == -1]
+        if invalid_rewards:
+            if not is_eval:
+                drop_counts["invalid_reward"] += len(group_samples)
+                logger.warning("Dropping training group with an invalid judge reward (%d segments)", len(group_samples))
+                return []
+            for sample in invalid_rewards:
+                sample.rewards = torch.zeros_like(sample.rewards)
+                sample.scores = torch.zeros_like(sample.scores)
+                sample.info["reward"] = sample.rewards
+                sample.info["score"] = sample.scores
 
         if dynamic_filtering and group_samples:
             # Compaction can emit several step-samples with the same terminal score. Keep one

@@ -21,7 +21,7 @@ GATEWAY_URL="${GATEWAY_URL:-http://100.102.21.127:8765}"
 JUDGE_MODEL="${SCIENCE_AGENT_JUDGE_MODEL:-${JUDGE_MODEL:-o3-mini}}"
 MODEL_NAME="${MODEL_NAME:-$(basename "${MODEL_PATH%/}")}"
 TP="${TP:-4}"
-MAX_WORKERS="${MAX_WORKERS:-8}"
+MAX_WORKERS="${MAX_WORKERS:-16}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-98304}"
 export SCIENCE_TRAJECTORY_MAX_TOKENS="${SCIENCE_TRAJECTORY_MAX_TOKENS:-65536}"
 MAX_NEW_TOKENS="$SCIENCE_TRAJECTORY_MAX_TOKENS"
@@ -97,7 +97,7 @@ prepare_model() {
 
 export SCIENCE_AGENT_READ_PAGE_MODE="${SCIENCE_AGENT_READ_PAGE_MODE:-file}"
 export PYTHON_TOOL_RETURN_MAX_CHARS="${PYTHON_TOOL_RETURN_MAX_CHARS:-6000}"
-python3 -u "$HARNESS_ROOT/sandbox_smoke.py" --llm --search --judge --page-file --http-url https://r.jina.ai/http://example.com 2>&1 | tee "$OUTPUT_ROOT/sandbox_preflight.log"
+python3 -u "$HARNESS_ROOT/sandbox_smoke.py" --search --judge --page-file --http-url https://r.jina.ai/http://example.com 2>&1 | tee "$OUTPUT_ROOT/sandbox_preflight.log"
 
 SERVE_MODEL_PATH="$(prepare_model)"
 

@@ -7,7 +7,7 @@ export MODEL_PATH="${MODEL_PATH:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/scientif
 export MODEL_NAME="${MODEL_NAME:-base-sandbox}"
 export OUTPUT_ROOT="${OUTPUT_ROOT:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/yangqingyu/eval/molt_hle100_sandbox/$(date +%Y%m%d-%H%M%S)}"
 export CONVERT_ROOT="${CONVERT_ROOT:-$OUTPUT_ROOT/hf_model}"
-export TP=4 MAX_WORKERS=8
+export TP=4 MAX_WORKERS="${MAX_WORKERS:-16}"
 export SCIENCE_TRAJECTORY_MAX_TOKENS="${SCIENCE_TRAJECTORY_MAX_TOKENS:-65536}"
 export MAX_NEW_TOKENS="$SCIENCE_TRAJECTORY_MAX_TOKENS" MAX_MODEL_LEN=98304
 export AGENT_CONTEXT_COMPACTION=0 AGENT_OBSERVATION_MASKING=0
