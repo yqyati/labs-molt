@@ -36,7 +36,7 @@ for path in (SCIENCE_AGENT_ROOT, INFERENCE_ROOT):
 from science_agent.eval.answer_extraction import find_boxed_spans, select_hle_candidate
 
 from react_agent_openai_api_tools import MultiTurnReactAgent  # noqa: E402
-from sandbox_gateway import sandbox_run_scope, shared_sandbox_run  # noqa: E402
+from sandbox_gateway import AgentSandboxRun, sandbox_run_scope, shared_sandbox_run  # noqa: E402
 
 
 def _text(value) -> str:
@@ -216,77 +216,96 @@ class ScienceLegacyReactAgent(ChatAgent):
         else:
             judge_system_prompt = ("Judge whether the candidate answer is scientifically correct and answers the question. Accept equivalent wording and reasoning. Return only JSON: {\"score\": 1 or 0, \"correct\": true or false, \"reason\": \"short explanation\"}. Use score 1 only when the answer is substantially correct.")
             judge_user_prompt = json.dumps({"question": ctx.prompt, "reference_answer": reference, "candidate_answer": prediction}, ensure_ascii=False)
-        # Tools and judge share one task-owned Sandbox; the outer scope cleans up.
+        # First try the task-owned Sandbox; replacements only judge the saved answer.
         judge_run = shared_sandbox_run()
-        for attempt in range(3):
-            judge_input = {
-                "model": judge_model,
-                "messages": [{"role": "system", "content": judge_system_prompt}, {"role": "user", "content": judge_user_prompt}],
-                "temperature": 0.0,
-                "max_tokens": int(os.environ.get("SCIENCE_AGENT_JUDGE_MAX_TOKENS", "6000" if next_protocol else "1800")),
-                "response_format": {"type": "json_object"},
-            }
+        retry_delays = (1, 5, 10, 30, 60, 180, 180, 180)
+        judge_attempts = 0
+        for sandbox_attempt in range(3):
+            if sandbox_attempt:
+                logger.warning("Retrying saved answer in replacement judge Sandbox %d/2", sandbox_attempt)
+                judge_run = AgentSandboxRun()
             try:
-                request_task = asyncio.create_task(asyncio.to_thread(
-                    judge_run.run_http,
-                    {
-                        "method": "POST", "url": judge_url, "json": judge_input,
-                        "headers": {
-                            "Content-Type": "application/json",
-                            "Authorization": "Bearer " + (os.environ.get("SCIENCE_AGENT_JUDGE_API_KEY") or os.environ["API_KEY"]),
-                        },
-                    },
-                    timeout=float(os.environ.get("SCIENCE_AGENT_JUDGE_TIMEOUT", "180")),
-                ))
-                try:
-                    response = await asyncio.shield(request_task)
-                except asyncio.CancelledError:
-                    # to_thread keeps running after cancellation. Wait before
-                    # deletion so it cannot create a Sandbox after cleanup.
+                for attempt in range(len(retry_delays) + 1):
+                    judge_attempts += 1
+                    judge_input = {
+                        "model": judge_model,
+                        "messages": [{"role": "system", "content": judge_system_prompt}, {"role": "user", "content": judge_user_prompt}],
+                        "temperature": 0.0,
+                        "max_tokens": int(os.environ.get("SCIENCE_AGENT_JUDGE_MAX_TOKENS", "6000" if next_protocol else "1800")),
+                        "response_format": {"type": "json_object"},
+                    }
                     try:
-                        await request_task
-                    finally:
-                        raise asyncio.CancelledError
-                raw_response = response["text"]
-                judge_response_summary = raw_response[:500]
-                if response["status_code"] >= 400:
-                    raise RuntimeError(f"Sandbox judge HTTP {response['status_code']}: {judge_response_summary}")
-                body = json.loads(raw_response)
-                choice = body["choices"][0]
-                judge_finish_reason = _text(choice.get("finish_reason", ""))
-                content = choice["message"]["content"]
-                if isinstance(content, list):
-                    content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-                content = _text(content).strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-                judge_content_chars = len(content)
-                parsed = json.loads(content)
-                if next_protocol:
-                    correct = parsed["correct"]
-                    if not isinstance(correct, bool):
-                        raise ValueError(f"invalid judge result: {parsed!r}")
-                    judge_result = {"correct": correct, "score": 1.0 if correct else 0.0, "reason": str(parsed.get("reason", ""))}
-                else:
-                    score = float(parsed["score"])
-                    if score not in (0.0, 1.0) or bool(parsed.get("correct")) != bool(score):
-                        raise ValueError(f"invalid judge result: {parsed!r}")
-                    judge_result = parsed
+                        request_task = asyncio.create_task(asyncio.to_thread(
+                            judge_run.run_http,
+                            {
+                                "method": "POST", "url": judge_url, "json": judge_input,
+                                "headers": {
+                                    "Content-Type": "application/json",
+                                    "Authorization": "Bearer " + (os.environ.get("SCIENCE_AGENT_JUDGE_API_KEY") or os.environ["API_KEY"]),
+                                },
+                            },
+                            timeout=float(os.environ.get("SCIENCE_AGENT_JUDGE_TIMEOUT", "180")),
+                        ))
+                        try:
+                            response = await asyncio.shield(request_task)
+                        except asyncio.CancelledError:
+                            # to_thread keeps running after cancellation. Wait before
+                            # deletion so it cannot create a Sandbox after cleanup.
+                            try:
+                                await request_task
+                            finally:
+                                raise asyncio.CancelledError
+                        raw_response = response["text"]
+                        judge_response_summary = raw_response[:500]
+                        if response["status_code"] >= 400:
+                            raise RuntimeError(f"Sandbox judge HTTP {response['status_code']}: {judge_response_summary}")
+                        body = json.loads(raw_response)
+                        choice = body["choices"][0]
+                        judge_finish_reason = _text(choice.get("finish_reason", ""))
+                        content = choice["message"]["content"]
+                        if isinstance(content, list):
+                            content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+                        content = _text(content).strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+                        judge_content_chars = len(content)
+                        parsed = json.loads(content)
+                        if next_protocol:
+                            correct = parsed["correct"]
+                            if not isinstance(correct, bool):
+                                raise ValueError(f"invalid judge result: {parsed!r}")
+                            judge_result = {"correct": correct, "score": 1.0 if correct else 0.0, "reason": str(parsed.get("reason", ""))}
+                        else:
+                            score = float(parsed["score"])
+                            if score not in (0.0, 1.0) or bool(parsed.get("correct")) != bool(score):
+                                raise ValueError(f"invalid judge result: {parsed!r}")
+                            judge_result = parsed
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        judge_error = f"{type(exc).__name__}: {exc}"
+                        logger.warning(
+                            "Science judge failure sandbox=%d/3 attempt=%d/%d url=%s model=%s prediction_chars=%d "
+                            "missing_prediction=%s empty_prediction=%s error=%s response=%s next_retry_s=%s",
+                            sandbox_attempt + 1,
+                            attempt + 1,
+                            len(retry_delays) + 1,
+                            judge_url,
+                            judge_model,
+                            len(prediction),
+                            prediction_missing,
+                            prediction_empty,
+                            judge_error,
+                            judge_response_summary[:500],
+                            retry_delays[attempt] if attempt < len(retry_delays) else None,
+                        )
+                        if attempt < len(retry_delays):
+                            await asyncio.sleep(retry_delays[attempt])
+            finally:
+                if sandbox_attempt:
+                    try:
+                        await asyncio.to_thread(judge_run.close)
+                    except Exception:
+                        logger.exception("Replacement judge Sandbox cleanup failed")
+            if judge_result is not None:
                 break
-            except Exception as exc:  # noqa: BLE001
-                judge_error = f"{type(exc).__name__}: {exc}"
-                logger.warning(
-                    "Science judge failure attempt=%d/3 url=%s model=%s prediction_chars=%d "
-                    "missing_prediction=%s empty_prediction=%s error=%s response=%s",
-                    attempt + 1,
-                    judge_url,
-                    judge_model,
-                    len(prediction),
-                    prediction_missing,
-                    prediction_empty,
-                    judge_error,
-                    judge_response_summary[:500],
-                )
-                if attempt < 2:
-                    await asyncio.sleep(2**attempt)
         # -1 means ungraded: training rejects it; evaluation counts it as zero.
         reward = float(judge_result["score"]) if judge_result is not None else -1.0
         tool_calls = sum(
@@ -304,6 +323,8 @@ class ScienceLegacyReactAgent(ChatAgent):
                 "science_judge_valid": torch.tensor(float(judge_result is not None), dtype=torch.float32),
                 "science_judge_model": judge_model,
                 "science_judge_backend": "gateway_sandbox",
+                "science_judge_attempts": torch.tensor(float(judge_attempts), dtype=torch.float32),
+                "science_judge_sandbox_restarts": torch.tensor(float(sandbox_attempt), dtype=torch.float32),
                 "science_judge_error": judge_error,
                 "science_judge_response": judge_response_summary,
                 "science_judge_finish_reason": judge_finish_reason,
