@@ -36,10 +36,14 @@ ACTOR_GPUS_PER_NODE=4
 VLLM_TP_SIZE=4
 FSDP_EP_SIZE=4
 FSDP_CP_SIZE=4
-N_SAMPLES_PER_PROMPT=8
-ROLLOUT_BATCH_SIZE=2
-ROLLOUT_VLLM_GENERATE_BATCH_SIZE=2
-TRAIN_BATCH_SIZE=8
+N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
+ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-2}"
+ROLLOUT_VLLM_GENERATE_BATCH_SIZE="${ROLLOUT_VLLM_GENERATE_BATCH_SIZE:-2}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-8}"
+dynamic_filter_args=()
+if [[ "${DYNAMIC_FILTERING_ENABLE:-1}" == "1" ]]; then
+  dynamic_filter_args=(--algo.dynamic_filtering_enable --algo.dynamic_filtering_range -0.1 1.1)
+fi
 TRAIN_MAX_TOKENS_PER_GPU=17000
 ACTOR_ENTROPY_COEF=0
 MAX_LEN="${MAX_LEN:-65536}"
@@ -51,18 +55,21 @@ export SCIENCE_AGENT_MODEL_PATH="$MODEL_PATH"
 export SCIENCE_AGENT_GATEWAY_URL="${SCIENCE_AGENT_GATEWAY_URL:-http://100.102.21.127:8765}"
 export SCIENCE_AGENT_JUDGE_BASE_URL="${SCIENCE_AGENT_JUDGE_BASE_URL:-${API_BASE%/}}"
 export SCIENCE_AGENT_JUDGE_MODEL="${SCIENCE_AGENT_JUDGE_MODEL:-o3-mini}"
+export SCIENCE_AGENT_JUDGE_MAX_TOKENS="${SCIENCE_AGENT_JUDGE_MAX_TOKENS:-6000}"
 export SCIENCE_AGENT_REWARD_MODE="${SCIENCE_AGENT_REWARD_MODE:-judge}"
 export NO_PROXY="${NO_PROXY:+$NO_PROXY,}100.102.21.127"
 export no_proxy="$NO_PROXY"
 export OPENAI_COMPAT_USE_SYSTEM_PROMPT=1 AGENT_TOOL_BACKEND=local AGENT_EVAL_FORCE_FINALIZE=0
 export LLM_RETRY_INCOMPLETE_OUTPUT=0
 export MAX_LLM_CALL_PER_RUN="${MAX_LLM_CALL_PER_RUN:-10000}" MAX_TOOL_CALLS_PER_RUN="${MAX_TOOL_CALLS_PER_RUN:-0}"
-export TASK_TIMEOUT_SEC="${TASK_TIMEOUT_SEC:-3600}" OPENAI_REQUEST_TIMEOUT="${OPENAI_REQUEST_TIMEOUT:-1800}"
+export TASK_TIMEOUT_SEC="${TASK_TIMEOUT_SEC:-9000}" OPENAI_REQUEST_TIMEOUT="${OPENAI_REQUEST_TIMEOUT:-1800}"
 export QWEN_API_MAX_OUTPUT_TOKENS="$MAX_NEW_TOKENS" SCIENCE_TRAJECTORY_MAX_TOKENS="$MAX_LEN"
-export SCIENCE_AGENT_SEARCH_MAX_RESULTS="${SCIENCE_AGENT_SEARCH_MAX_RESULTS:-6}"
-export SCIENCE_AGENT_SEARCH_SNIPPET_CHARS="${SCIENCE_AGENT_SEARCH_SNIPPET_CHARS:-600}"
-export SCIENCE_AGENT_SCHOLAR_MAX_RESULTS="${SCIENCE_AGENT_SCHOLAR_MAX_RESULTS:-6}"
-export SCIENCE_AGENT_SCHOLAR_SNIPPET_CHARS="${SCIENCE_AGENT_SCHOLAR_SNIPPET_CHARS:-700}"
+export AGENT_EVAL_ENABLE_MODEL_IMAGE_INPUTS="${AGENT_EVAL_ENABLE_MODEL_IMAGE_INPUTS:-1}"
+export MAX_IMAGES_PER_PROMPT="${MAX_IMAGES_PER_PROMPT:-1}"
+export SCIENCE_AGENT_SEARCH_MAX_RESULTS="${SCIENCE_AGENT_SEARCH_MAX_RESULTS:-10}"
+export SCIENCE_AGENT_SEARCH_SNIPPET_CHARS="${SCIENCE_AGENT_SEARCH_SNIPPET_CHARS:-0}"
+export SCIENCE_AGENT_SCHOLAR_MAX_RESULTS="${SCIENCE_AGENT_SCHOLAR_MAX_RESULTS:-0}"
+export SCIENCE_AGENT_SCHOLAR_SNIPPET_CHARS="${SCIENCE_AGENT_SCHOLAR_SNIPPET_CHARS:-0}"
 # Keep Python, web requests, and judging in the same task-owned sandbox.
 export PYTHONPATH="$REPO_ROOT:$SCIENCE_AGENT_ROOT:$SCIENCE_AGENT_ROOT/inference${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHON_SESSION_BACKEND=gateway_sandbox SCIENCE_AGENT_TOOL_HTTP_BACKEND=gateway_sandbox
@@ -187,6 +194,7 @@ python3 -u -m molt.cli.train_rl_ray \
   --actor.model_name_or_path "$MODEL_PATH" \
   --data.prompt_dataset "$DATASET" --data.input_key prompt --data.label_key science_item --data.apply_chat_template \
   --data.max_samples "$MAX_SAMPLES" --data.max_len "$MAX_LEN" \
+  --data.max_images_per_prompt "$MAX_IMAGES_PER_PROMPT" \
   --rollout.batch_size "$ROLLOUT_BATCH_SIZE" --rollout.vllm_generate_batch_size "$ROLLOUT_VLLM_GENERATE_BATCH_SIZE" --rollout.micro_batch_size 1 \
   --rollout.n_samples_per_prompt "$N_SAMPLES_PER_PROMPT" --rollout.max_new_tokens "$MAX_NEW_TOKENS" --rollout.temperature 1.0 --rollout.top_p 1.0 \
   --train.batch_size "$TRAIN_BATCH_SIZE" --train.micro_batch_size 1 --train.max_tokens_per_gpu "$TRAIN_MAX_TOKENS_PER_GPU" --train.max_epochs 1 \
@@ -197,10 +205,11 @@ python3 -u -m molt.cli.train_rl_ray \
   --fsdp.param_dtype bf16 --fsdp.attn_implementation te --fsdp.tp_size 1 --fsdp.ep_size 4 --fsdp.cp_size 4 --fsdp.offload "$FSDP_OFFLOAD" \
   --actor.gradient_checkpoint full --actor.adam.lr 1e-6 --actor.entropy_coef 0 --actor.loss_mode ppo --actor.eps_clip_low_high 0.2 0.27 \
   --algo.advantage.estimator reinforce_baseline --algo.advantage.is_correction_level geo --train.force_on_policy \
-  --algo.dynamic_filtering_enable --algo.dynamic_filtering_range -0.1 1.1 --algo.kl.estimator k1 --algo.kl.init_coef 0 --reward.clip_range -10 10 \
+  "${dynamic_filter_args[@]}" --algo.kl.estimator k1 --algo.kl.init_coef 0 --reward.clip_range -10 10 \
   --train.agent_path "$REPO_ROOT/examples/python/agents/science_legacy_react_sandbox.py" \
   --ckpt.output_dir "$SAVE_ROOT/hf" --ckpt.path "$SAVE_ROOT/state" --ckpt.save_steps "$CKPT_SAVE_STEPS" --ckpt.max_num 0 \
   --no-ckpt.save_optimizer --ckpt.disable_final_save --logger.logging_steps 1 --logger.tensorboard_dir "$RUN_ROOT/tensorboard" \
+  "$@" \
   2>&1 | tee -a "$LOG_ROOT/train.log"
 status=${PIPESTATUS[0]}
 set -e
