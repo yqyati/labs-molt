@@ -208,7 +208,7 @@ python3 -u -m molt.cli.train_rl_ray \
   "${dynamic_filter_args[@]}" --algo.kl.estimator k1 --algo.kl.init_coef 0 --reward.clip_range -10 10 \
   --train.agent_path "$REPO_ROOT/examples/python/agents/science_legacy_react_sandbox.py" \
   --ckpt.output_dir "$SAVE_ROOT/hf" --ckpt.path "$SAVE_ROOT/state" --ckpt.save_steps "$CKPT_SAVE_STEPS" --ckpt.max_num 0 \
-  --no-ckpt.save_optimizer --ckpt.disable_final_save --logger.logging_steps 1 --logger.tensorboard_dir "$RUN_ROOT/tensorboard" \
+  --no-ckpt.save_optimizer --logger.logging_steps 1 --logger.tensorboard_dir "$RUN_ROOT/tensorboard" \
   "$@" \
   2>&1 | tee -a "$LOG_ROOT/train.log"
 status=${PIPESTATUS[0]}

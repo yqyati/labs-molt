@@ -84,9 +84,9 @@ export ROUTING_REPLAY="${ROUTING_REPLAY:-1}"
 # Chat agent (loopback OpenAI SDK harness), NOT the STEP runner.
 # Text math Env agent (GLM-5.2 is text-only; the VLM chat_geo3k agent does not apply).
 export AGENT_PATH="${AGENT_PATH:-/molt/examples/python/agents/math.py}"
-# Bounded run: don't persist a ~750B checkpoint (skip intermediate + final saves).
+# Keep periodic saves sparse; export the final model when training completes.
 export SAVE_STEPS="${SAVE_STEPS:-1000}"
-export DISABLE_FINAL_SAVE="${DISABLE_FINAL_SAVE:-1}"
+export DISABLE_FINAL_SAVE="${DISABLE_FINAL_SAVE:-0}"
 # Sparse pass@1 eval so the 50-step run isn't dominated by eval rollouts.
 export EVAL_STEPS="${EVAL_STEPS:-25}"
 export EVAL_N_SAMPLES_PER_PROMPT="${EVAL_N_SAMPLES_PER_PROMPT:-1}"

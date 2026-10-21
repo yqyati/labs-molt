@@ -58,4 +58,4 @@ PY
 cd "$REPO_ROOT"
 export RUN_NAME="${RUN_NAME:-science_agent_async_training_8gpu_4plus4_$(date +%Y%m%d_%H%M%S)}"
 echo "rjob_name=$RJOB_NAME run_name=$RUN_NAME train_script=$TRAIN_SCRIPT"
-exec bash "$TRAIN_SCRIPT"
+exec bash "$TRAIN_SCRIPT" "$@"

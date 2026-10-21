@@ -25,6 +25,9 @@ issue/PR links.
 
 ## Workflow
 
+- All training runs must export the final model on completion, including runs
+  ending between periodic saves. Do not enable `ckpt.disable_final_save` or
+  `DISABLE_FINAL_SAVE=1` in training launch commands.
 - Reviews report findings only; fixes ship as one minimal diff per issue
   after approval.
 - Verify with `python -m compileall -q molt examples/python tests` and
