@@ -211,7 +211,7 @@ class RemoteExperienceMaker:
 
     @torch.no_grad()
     def compute_advantages_and_returns(self, experiences: List[Experience]) -> List[Experience]:
-        """Clip rewards, run the estimator (which returns per-token advantages/returns), assemble onto exps.
+        """Clip/shape rewards, run the estimator (per-token advantages/returns), assemble onto exps.
 
         Estimators live in `advantage.py` and never see `Experience`: this method extracts the small
         tensor inputs (rewards, action masks, per-token KL), builds the `AdvantageContext`, and
@@ -229,6 +229,50 @@ class RemoteExperienceMaker:
         clip = args.reward.clip_range
         rewards = rollouts["rewards"].clamp(min=clip[0], max=clip[1]) if clip else rollouts["rewards"]
 
+        self.reward_shaping_metrics = {}
+        penalty = getattr(args.reward, "group_length_penalty", None)
+        if penalty is not None and penalty.enable:
+            if self.advantage_estimator not in GROUP_ADVANTAGE_ESTIMATORS or args.rollout.n_samples_per_prompt <= 1:
+                raise ValueError("Group length penalty requires same-prompt multi-sample group advantages.")
+            raw_rewards = rollouts["rewards"]
+            if not torch.all((raw_rewards == 0) | (raw_rewards == 1)):
+                raise ValueError("Group length penalty requires binary correctness rewards (0 or 1).")
+            # Action masks exclude prompts and tool observations. Sum all segments of a rollout,
+            # while its repeated terminal reward is counted only once by _merge_rollout_rewards.
+            sample_lengths = torch.cat([exp.action_mask.sum(dim=-1) for exp in experiences]).to(rewards)
+            lengths = torch.zeros_like(rewards).scatter_add_(
+                0,
+                rollouts["sample_to_rollout"].to(rewards.device),
+                sample_lengths,
+            )
+            if not torch.all(torch.isfinite(lengths) & (lengths > 0)):
+                raise ValueError("Group length penalty requires positive generated-token lengths.")
+            deductions = torch.zeros_like(rewards)
+            eligible_groups = incomplete_groups = 0
+            for group in rollouts["groups"]:
+                # Partial groups must not set the success gate or the reference percentile.
+                if len(group) != args.rollout.n_samples_per_prompt:
+                    incomplete_groups += 1
+                    continue
+                successful = raw_rewards[group] == 1
+                if successful.sum().item() / len(group) <= penalty.min_pass_rate:
+                    continue
+                eligible_groups += 1
+                rows = torch.tensor(group, device=rewards.device)[successful]
+                reference = torch.quantile(lengths[rows], penalty.quantile)
+                excess = lengths[rows] / reference - (1 + penalty.tolerance)
+                deductions[rows] = penalty.max_penalty * (excess / (penalty.saturation - penalty.tolerance)).clamp(
+                    0, 1
+                )
+            rewards = rewards - deductions
+            self.reward_shaping_metrics = {
+                "rollout/length_shaped_reward_mean": rewards.mean().item(),
+                "rollout/length_penalty_mean": deductions.mean().item(),
+                "rollout/length_penalized_fraction": (deductions > 0).float().mean().item(),
+                "rollout/length_penalty_eligible_group_fraction": eligible_groups / len(rollouts["groups"]),
+                "rollout/length_penalty_incomplete_group_fraction": incomplete_groups / len(rollouts["groups"]),
+            }
+
         # PPO/gae is the only estimator that consumes a learned value baseline; the
         # critic filled exp.values during make_experience. Other estimators ignore it.
         needs_values = self.advantage_estimator == "gae"
@@ -245,7 +289,7 @@ class RemoteExperienceMaker:
         )
         advantages, returns = get_advantage_estimator(self.advantage_estimator)(rewards, rollouts["groups"], ctx)
 
-        # Per-group reward std (on clipped rewards), broadcast to samples, for logging only.
+        # Per-group training reward std (after clipping/shaping), broadcast for logging only.
         rollout_stds = torch.zeros_like(rewards)
         for group in rollouts["groups"]:
             rollout_stds[group] = rewards[group].std() if len(group) > 1 else 0.0

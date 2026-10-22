@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Rollout reward metrics must not weight a trajectory by how many turns it took."""
+
 import types
 
 import pytest
 
 torch = pytest.importorskip("torch")
 
-from molt.trainer.rl_trainer import _collect_rollout_rewards
+from molt.trainer.rl_trainer import BaseRLTrainer, _collect_rollout_rewards
 from molt.trainer.rollout.experience_maker import rollout_and_group_ids
 
 
@@ -79,3 +80,18 @@ def test_shared_id_fallbacks():
 
     bare = types.SimpleNamespace(rollout_ids=None, group_ids=None, index=[7])
     assert rollout_and_group_ids(bare) == ([7], [7])
+
+
+def test_group_length_penalty_refuses_dp_dropped_segments():
+    trainer = types.SimpleNamespace(
+        args=types.SimpleNamespace(
+            actor=types.SimpleNamespace(num_nodes=1, num_gpus_per_node=2),
+            fsdp=types.SimpleNamespace(cp_size=1, tp_size=1, ep_size=1),
+            reward=types.SimpleNamespace(group_length_penalty=types.SimpleNamespace(enable=True)),
+        )
+    )
+    samples = [_sample([f"r{i}"], ["g"], [1.0]) for i in range(3)]
+    for sample in samples:
+        sample.total_length = torch.tensor([100])
+    with pytest.raises(ValueError, match="dropped trajectory segments"):
+        BaseRLTrainer.train_step(trainer, samples, 0)

@@ -18,6 +18,7 @@
 
 import argparse
 import copy
+import math
 import os
 
 from molt.trainer.algorithm.experience import get_model_parallel_size
@@ -605,6 +606,36 @@ if __name__ == "__main__":
         "sequence weighs the same).",
     )
     parser.add_argument("--reward.clip_range", type=float, nargs=2, default=(-10, 10), help="Reward clip range")
+    parser.add_argument(
+        "--reward.group_length_penalty.enable",
+        action="store_true",
+        help="Penalize overlong successful trajectories within complete same-prompt groups (binary rewards only).",
+    )
+    parser.add_argument(
+        "--reward.group_length_penalty.min_pass_rate",
+        type=float,
+        default=0.5,
+        help="Apply only when group success rate strictly exceeds this threshold.",
+    )
+    parser.add_argument(
+        "--reward.group_length_penalty.quantile",
+        type=float,
+        default=0.5,
+        help="Successful generated-token length quantile used as the reference.",
+    )
+    parser.add_argument("--reward.group_length_penalty.max_penalty", type=float, default=0.1)
+    parser.add_argument(
+        "--reward.group_length_penalty.tolerance",
+        type=float,
+        default=0.2,
+        help="Free relative length excess above the reference.",
+    )
+    parser.add_argument(
+        "--reward.group_length_penalty.saturation",
+        type=float,
+        default=1.0,
+        help="Relative length excess at which the maximum penalty is reached.",
+    )
 
     # Rollout / generation
     parser.add_argument("--train.agent_path", type=str, default=None, help="Agent script path")
@@ -1015,6 +1046,30 @@ if __name__ == "__main__":
         args.train.partial_rollout_enable = True
 
     # --- Algorithm checks ---
+    length_penalty = args.reward.group_length_penalty
+    if length_penalty.enable:
+        if args.algo.advantage.estimator not in ("grpo", "dr_grpo", "reinforce_baseline", "rloo"):
+            raise ValueError("Group length penalty requires a group-relative advantage estimator.")
+        if args.rollout.n_samples_per_prompt <= 1:
+            raise ValueError("Group length penalty requires n_samples_per_prompt > 1.")
+        if not all(
+            math.isfinite(v)
+            for v in (
+                length_penalty.min_pass_rate,
+                length_penalty.quantile,
+                length_penalty.max_penalty,
+                length_penalty.tolerance,
+                length_penalty.saturation,
+            )
+        ):
+            raise ValueError("Group length penalty parameters must be finite.")
+        if not (0 <= length_penalty.min_pass_rate < 1 and 0 <= length_penalty.quantile <= 1):
+            raise ValueError("Group length penalty requires min_pass_rate in [0, 1) and quantile in [0, 1].")
+        if not (0 <= length_penalty.max_penalty < 1 and 0 <= length_penalty.tolerance < length_penalty.saturation):
+            raise ValueError("Group length penalty requires max_penalty in [0, 1) and 0 <= tolerance < saturation.")
+        if args.reward.clip_range and not (args.reward.clip_range[0] <= 0 and args.reward.clip_range[1] >= 1):
+            raise ValueError("Group length penalty requires a reward clip range containing [0, 1].")
+
     # Group-relative estimators need >1 sample per prompt to form a baseline during training;
     # eval-only never trains, so skip that gate (eval uses --eval.n_samples_per_prompt).
     if not args.eval.eval_only and args.algo.advantage.estimator in ["rloo", "reinforce_baseline", "grpo", "dr_grpo"]:

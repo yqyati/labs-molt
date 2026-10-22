@@ -15,6 +15,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 import molt.trainer.algorithm.experience as experience_mod
@@ -71,15 +72,25 @@ def test_balance_experiences_equal_count_and_length_sorted():
         assert block_lengths == sorted(block_lengths, reverse=True)
 
 
-def _grpo_maker():
+def _grpo_maker(length_penalty=False, n_samples=4):
     """A duck-typed RemoteExperienceMaker self with just the fields compute_advantages reads."""
     maker = SimpleNamespace(
         advantage_estimator="grpo",
         kl_ctl=SimpleNamespace(value=0.0),
         args=SimpleNamespace(
-            reward=SimpleNamespace(clip_range=None),
+            reward=SimpleNamespace(
+                clip_range=None,
+                group_length_penalty=SimpleNamespace(
+                    enable=length_penalty,
+                    min_pass_rate=0.5,
+                    quantile=0.5,
+                    max_penalty=0.1,
+                    tolerance=0.2,
+                    saturation=1.0,
+                ),
+            ),
             algo=SimpleNamespace(advantage=SimpleNamespace(gamma=1.0, lam=1.0, no_whiten=False)),
-            rollout=SimpleNamespace(n_samples_per_prompt=4),
+            rollout=SimpleNamespace(n_samples_per_prompt=n_samples),
         ),
     )
     # Bind the two instance methods the estimator path dispatches through (each reads only its args).
@@ -119,6 +130,106 @@ def test_distributed_advantages_match_materialized():
     for i in range(8):
         assert torch.allclose(per_sample[i].advantages[0], concat.advantages[i])
         assert torch.allclose(per_sample[i].returns[0], concat.returns[i])
+
+
+def test_group_length_penalty_success_median_and_raw_rewards():
+    maker = _grpo_maker(length_penalty=True, n_samples=8)
+    maker.advantage_estimator = "dr_grpo"
+    raw_rewards = [1, 1, 1, 1, 1, 1, 0, 0]
+    lengths = [80, 90, 100, 100, 160, 200, 400, 500]
+    samples = [_sample(i, "g", reward, length) for i, (reward, length) in enumerate(zip(raw_rewards, lengths))]
+    for sample in samples:
+        sample.info["reward"] = sample.rewards.clone()
+    maker.compute_advantages_and_returns(samples)
+
+    expected_rewards = torch.tensor([1, 1, 1, 1, 0.95, 0.9, 0, 0])
+    for i, sample in enumerate(samples):
+        assert torch.allclose(sample.returns, torch.full_like(sample.returns, expected_rewards[i] - 0.73125))
+        assert sample.rewards.item() == sample.info["reward"].item() == raw_rewards[i]
+    assert maker.reward_shaping_metrics["rollout/length_shaped_reward_mean"] == pytest.approx(0.73125)
+    assert maker.reward_shaping_metrics["rollout/length_penalty_mean"] == pytest.approx(0.01875)
+    assert maker.reward_shaping_metrics["rollout/length_penalized_fraction"] == 0.25
+
+
+@pytest.mark.parametrize("successes", [0, 1, 4])
+def test_group_length_penalty_preserves_low_success_groups(successes):
+    maker = _grpo_maker(length_penalty=True, n_samples=8)
+    samples = [_sample(i, "g", i < successes, 200 if i == 0 else 100) for i in range(8)]
+    maker.compute_advantages_and_returns(samples)
+    assert maker.reward_shaping_metrics["rollout/length_penalty_mean"] == 0
+    assert maker.reward_shaping_metrics["rollout/length_penalty_eligible_group_fraction"] == 0
+    assert maker.reward_shaping_metrics["rollout/length_shaped_reward_mean"] == successes / 8
+
+
+def test_group_length_penalty_strict_custom_gate_and_free_length_margin():
+    maker = _grpo_maker(length_penalty=True, n_samples=5)
+    maker.args.reward.group_length_penalty.min_pass_rate = 0.6
+    samples = [_sample(i, "g", i < 3, 200 if i == 0 else 100) for i in range(5)]
+    maker.compute_advantages_and_returns(samples)
+    assert maker.reward_shaping_metrics["rollout/length_penalty_eligible_group_fraction"] == 0
+
+    samples = [_sample(i, "g", 1, 120 if i == 0 else 100) for i in range(5)]
+    maker.compute_advantages_and_returns(samples)
+    assert maker.reward_shaping_metrics["rollout/length_penalized_fraction"] == 0
+    assert all(torch.count_nonzero(sample.advantages) == 0 for sample in samples)
+
+
+@pytest.mark.parametrize("estimator", ["grpo", "dr_grpo", "reinforce_baseline", "rloo"])
+def test_group_length_penalty_all_successes_produce_length_advantages(estimator):
+    maker = _grpo_maker(length_penalty=True)
+    maker.advantage_estimator = estimator
+    samples = [_sample(i, "g", 1, 200 if i == 3 else 100) for i in range(4)]
+    maker.compute_advantages_and_returns(samples)
+    assert all(torch.all(sample.advantages > 0) for sample in samples[:3])
+    assert torch.all(samples[3].advantages < 0)
+    assert maker.reward_shaping_metrics["rollout/length_shaped_reward_mean"] == pytest.approx(0.975)
+
+
+def test_group_length_penalty_sums_segments_and_keeps_groups_independent():
+    maker = _grpo_maker(length_penalty=True)
+    maker.advantage_estimator = "dr_grpo"
+    samples = [_sample(i, "short", 1, 100 if i else 80) for i in range(4)]
+    second_segment = _sample(8, "short", 1, 120)
+    second_segment.rollout_ids = samples[0].rollout_ids.copy()
+    samples.append(second_segment)
+    samples.extend(_sample(i + 4, "long", 1, 2000 if i == 0 else 1000) for i in range(4))
+    # Inactive positions represent prompt/observation tokens and must not affect length.
+    second_segment.action_mask = torch.cat([second_segment.action_mask, torch.zeros(1, 300, dtype=torch.bool)], -1)
+    second_segment.kl = torch.zeros_like(second_segment.action_mask, dtype=torch.float)
+    maker.compute_advantages_and_returns(samples)
+    assert samples[0].returns[0, 0].item() == pytest.approx(-0.075)
+    assert second_segment.returns[0, 0].item() == pytest.approx(-0.075)
+    assert samples[5].returns[0, 0].item() == pytest.approx(-0.075)
+    assert samples[1].returns[0, 0].item() == pytest.approx(0.025)
+    assert maker.reward_shaping_metrics["rollout/length_penalty_mean"] == pytest.approx(0.025)
+    assert maker.reward_shaping_metrics["rollout/length_penalized_fraction"] == 0.25
+
+
+@pytest.mark.parametrize("enabled,lengths", [(False, [100, 100, 100, 200]), (True, [100] * 4)])
+def test_group_length_penalty_disabled_or_equal_lengths_keeps_zero_advantages(enabled, lengths):
+    maker = _grpo_maker(length_penalty=enabled)
+    samples = [_sample(i, "g", 1, length) for i, length in enumerate(lengths)]
+    maker.compute_advantages_and_returns(samples)
+    assert all(torch.count_nonzero(sample.advantages) == 0 for sample in samples)
+    if not enabled:
+        assert maker.reward_shaping_metrics == {}
+
+
+def test_group_length_penalty_skips_incomplete_groups():
+    maker = _grpo_maker(length_penalty=True)
+    maker.compute_advantages_and_returns([_sample(i, "g", 1, 200 if i == 0 else 100) for i in range(3)])
+    assert maker.reward_shaping_metrics["rollout/length_penalty_mean"] == 0
+    assert maker.reward_shaping_metrics["rollout/length_penalty_incomplete_group_fraction"] == 1
+
+
+def test_group_length_penalty_rejects_nonbinary_rewards_and_flash():
+    maker = _grpo_maker(length_penalty=True)
+    with pytest.raises(ValueError, match="binary"):
+        maker.compute_advantages_and_returns([_sample(0, "g", 0.5)])
+    maker.advantage_estimator = "flash_reinforce"
+    maker._per_sample_rewards = RemoteExperienceMaker._per_sample_rewards
+    with pytest.raises(ValueError, match="group advantages"):
+        maker.compute_advantages_and_returns([_sample(0, "g", 1)])
 
 
 def test_text_info_survives_batching_and_splitting():

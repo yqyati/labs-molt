@@ -331,6 +331,12 @@ class BaseRLTrainer:
         # it is used).
         t0 = time.time()
         experiences = balance_experiences(rollout_samples, self.args)
+        penalty = getattr(self.args.reward, "group_length_penalty", None)
+        if penalty is not None and penalty.enable and len(experiences) != len(rollout_samples):
+            raise ValueError(
+                "Group length penalty cannot use dropped trajectory segments. "
+                "Use a rollout sample count divisible by the effective actor DP size."
+            )
         experiences = self.experience_maker.build_experiences(experiences)
         make_experience_time = time.time() - t0
 
@@ -433,6 +439,7 @@ class BaseRLTrainer:
 
         # Merge rollout stats (ground-truth, pre-dynamic-batch)
         status.update(rollout_stats)
+        status.update(self.experience_maker.reward_shaping_metrics)
 
         status["generated_samples"] = sample0
         return status, global_step + 1

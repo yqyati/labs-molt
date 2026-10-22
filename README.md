@@ -202,6 +202,24 @@ Common RL switches:
 | Dump / replay a rollout batch | `--train.rollout_dump_dir <dir>` then `--train.rollout_replay_dir <dir>` re-runs training on it without regenerating |
 | Check weight-update coverage | `--train.check_weight_update_equal` warns which vLLM params a broadcast left stale |
 
+#### Optional group-relative length penalty
+
+Add `--reward.group_length_penalty.enable` to a multi-sample GRPO, Dr.GRPO,
+REINFORCE-baseline, or RLOO recipe with binary correctness rewards. It defaults off.
+Only complete prompt groups with success rate **strictly above 0.5** are shaped.
+The reference is the successful trajectories' median generated-token length;
+prompt and tool-observation tokens are excluded, and multi-segment lengths are summed per rollout.
+Successful rewards become `1 - 0.1 * clamp((length/reference - 1 - 0.2)/0.8, 0, 1)`;
+failed rewards stay zero. These experimental defaults can be changed with
+`--reward.group_length_penalty.{min_pass_rate,quantile,max_penalty,tolerance,saturation}`.
+
+Shaping happens before group baselines and advantage normalization. Original `reward`,
+`score`, and `rollout/pass1` remain unchanged; `rollout/length_shaped_reward_mean`,
+`rollout/length_penalty_mean`, and the penalized/eligible/incomplete fractions report shaping separately.
+DP balancing must retain all trajectory segments; configurations that drop a remainder fail explicitly.
+This does not apply to evaluation or Flash single-sample training. Normalization can amplify small
+reward differences, so compare a short controlled run before scaling up.
+
 ## 📊 How It Compares
 
 The RL ecosystem optimizes for breadth. Molt optimizes for
