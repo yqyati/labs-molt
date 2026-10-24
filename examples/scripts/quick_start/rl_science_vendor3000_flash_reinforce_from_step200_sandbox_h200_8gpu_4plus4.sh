@@ -14,13 +14,13 @@ fi
 unset SCIENCE_TRAIN_SANDBOX_ENV_LOADED
 
 MODEL_PATH="${MODEL_PATH:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/yangqingyu/eval/molt_hle360_sandbox/hle360-rl15993171-step200-nomask-t06-120k-20261020-092840/hf_model/model}"
-DATASET="${DATASET:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/yangqingyu/workspace/science_training_reports/vendor3000-grpo8-from-rl15993171-step200/train.jsonl}"
-RUN_NAME="${RUN_NAME:-science_agent_vendor3000_flashrl8_from_step200_$(date +%Y%m%d_%H%M%S)}"
+DATASET="${DATASET:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/yangqingyu/workspace/science_training_reports/vendor_balanced_math40_difficulty6_7_20261023/train.jsonl}"
+RUN_NAME="${RUN_NAME:-science_agent_vendor3443_math40_flashrl8_from_step200_$(date +%Y%m%d_%H%M%S)}"
 GPFS1_USER_ROOT="${GPFS1_USER_ROOT:-/mnt/shared-storage-user/ai4sgi-gpfs1/yangqingyu}"
 RUN_ROOT="${RUN_ROOT:-$GPFS1_USER_ROOT/workspace/labs-molt/runs/$RUN_NAME}"
 LOG_ROOT="${LOG_ROOT:-$RUN_ROOT/logs}"
 SAVE_ROOT="${SAVE_ROOT:-$RUN_ROOT/checkpoint}"
-MAX_SAMPLES="${MAX_SAMPLES:-3000}"
+MAX_SAMPLES="${MAX_SAMPLES:-3443}"
 
 mkdir -p "$LOG_ROOT" "$SAVE_ROOT"
 # Reserve the state directory so reruns cannot overwrite existing checkpoints.

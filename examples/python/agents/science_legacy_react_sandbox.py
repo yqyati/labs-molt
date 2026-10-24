@@ -36,7 +36,7 @@ for path in (SCIENCE_AGENT_ROOT, INFERENCE_ROOT):
 from science_agent.eval.answer_extraction import find_boxed_spans, select_hle_candidate
 
 from react_agent_openai_api_tools import MultiTurnReactAgent  # noqa: E402
-from sandbox_gateway import AgentSandboxRun, sandbox_run_scope, shared_sandbox_run  # noqa: E402
+from sandbox_gateway import AgentSandboxRun, SandboxGatewayError, SandboxStateError, sandbox_run_scope, shared_sandbox_run  # noqa: E402
 
 
 def _text(value) -> str:
@@ -106,7 +106,7 @@ class ScienceLegacyReactAgent(ChatAgent):
                 "answer": reference,
                 "messages": list(ctx.messages),
                 "dataset_base_dir": os.environ.get("SCIENCE_DATASET_BASE_DIR", str(SCIENCE_AGENT_ROOT)),
-                "source": "Nemotron-RL-Science-v1",
+                "source": sample.get("source", "Nemotron-RL-Science-v1"),
             },
             "planning_port": None,
             "tool_artifact_dir": os.environ.get("SCIENCE_TOOL_ARTIFACT_DIR", ""),
@@ -124,8 +124,17 @@ class ScienceLegacyReactAgent(ChatAgent):
             finally:
                 raise asyncio.CancelledError
         raw_prediction = _text(result.get("prediction") if isinstance(result, dict) else result)
+        amo_protocol = os.environ.get("SCIENCE_AGENT_EVAL_BENCHMARK", "") == "amobench"
         next_protocol = os.environ.get("SCIENCE_AGENT_NEXT_HLE_EVAL_PROTOCOL", "0").lower() in {"1", "true", "yes"}
         prediction = _extract_hle_candidate(raw_prediction) if next_protocol else raw_prediction
+        if amo_protocol:
+            prediction = raw_prediction.rsplit("</think>", 1)[-1].strip()
+            for token in ("<|im_start|>", "<|im_end|>", "<|endoftext|>"):
+                prediction = prediction.replace(token, "")
+            spans = find_boxed_spans(prediction)
+            if spans:
+                prediction = "\n".join(span.canonical for span in spans)
+            next_protocol = True
         if prediction.strip().casefold() in {"your answer", "your final answer"}:
             prediction = ""
         prediction_missing = isinstance(result, dict) and "prediction" not in result
@@ -210,23 +219,51 @@ class ScienceLegacyReactAgent(ChatAgent):
         judge_response_summary = ""
         judge_finish_reason = ""
         judge_content_chars = 0
-        if next_protocol:
-            judge_system_prompt = ("You are a strict grader for physics problems. Given a problem and a candidate solution, decide whether the candidate answer is correct. Be strict: the final answer must match the ground truth (allow equivalent forms).")
+        if amo_protocol:
+            judge_system_prompt = "You are a strict grader for mathematical competition answers."
+            judge_user_prompt = (
+                "You are grading an attempted answer to a mathematical competition problem.\n"
+                "The reference answer may be a list of acceptable answers. Mark correct only when the attempted "
+                "final answer is mathematically equivalent to a reference answer. Ignore harmless formatting "
+                "such as \\boxed{...}, surrounding prose, or equivalent LaTeX formatting. "
+                "Leading zeros are harmless but a different value is incorrect.\n"
+                f"Problem:\n{ctx.prompt}\n\nReference answer:\n{reference}\n\n"
+                f"Attempted extracted answer:\n{prediction}\n\n"
+                'Return only valid JSON: {"correct": true/false, "reason": "brief explanation"}.'
+            )
+        elif next_protocol:
+            judge_system_prompt = ("You are a strict grader for problems across all academic disciplines. Given a problem and a candidate solution, decide whether the candidate answer is correct. Be strict: the final answer must match the ground truth (allow equivalent forms).")
             judge_user_prompt = ("You will output ONLY valid JSON with this schema:\n{\"correct\": true/false, \"reason\": \"one-sentence reason\"}\n\n" f"Problem:\n{ctx.prompt}\n\nCandidate answer (model output):\n{prediction}\n\nGround truth answer:\n{reference}\n")
         else:
-            judge_system_prompt = ("Judge whether the candidate answer is scientifically correct and answers the question. Accept equivalent wording and reasoning. Return only JSON: {\"score\": 1 or 0, \"correct\": true or false, \"reason\": \"short explanation\"}. Use score 1 only when the answer is substantially correct.")
-            judge_user_prompt = json.dumps({"question": ctx.prompt, "reference_answer": reference, "candidate_answer": prediction}, ensure_ascii=False)
+            judge_system_prompt = (
+                "You are a grader for problems across all academic disciplines. "
+                "Judge whether the candidate answer is substantially correct and answers the question, "
+                "using the reference answer as the grading reference. "
+                "Accept equivalent wording, reasoning, and mathematical expressions. "
+                "Make your grading decision without unnecessary deliberation, "
+                "and return only the requested JSON with a brief reason."
+            )
+            judge_user_prompt = (
+                'You will output ONLY valid JSON with this schema:\n'
+                '{"score": 1 or 0, "correct": true or false, "reason": "one-sentence reason"}\n\n'
+                "Use score 1 and correct true only when the answer is substantially correct.\n"
+                "Otherwise, use score 0 and correct false.\n\n"
+                f"Problem:\n{ctx.prompt}\n\n"
+                f"Candidate answer (model output):\n{prediction}\n\n"
+                f"Ground truth answer:\n{reference}\n"
+            )
         # First try the task-owned Sandbox; replacements only judge the saved answer.
         judge_run = shared_sandbox_run()
         retry_delays = (1, 5, 10, 30, 60, 180, 180, 180)
         judge_attempts = 0
+        judge_thinking_fallbacks = 0
         for sandbox_attempt in range(3):
             if sandbox_attempt:
                 logger.warning("Retrying saved answer in replacement judge Sandbox %d/2", sandbox_attempt)
                 judge_run = AgentSandboxRun()
+            judge_connection_failures = 0
             try:
                 for attempt in range(len(retry_delays) + 1):
-                    judge_attempts += 1
                     judge_input = {
                         "model": judge_model,
                         "messages": [{"role": "system", "content": judge_system_prompt}, {"role": "user", "content": judge_user_prompt}],
@@ -234,53 +271,84 @@ class ScienceLegacyReactAgent(ChatAgent):
                         "max_tokens": int(os.environ.get("SCIENCE_AGENT_JUDGE_MAX_TOKENS", "6000" if next_protocol else "1800")),
                         "response_format": {"type": "json_object"},
                     }
+                    judge_thinking = os.environ.get("SCIENCE_AGENT_JUDGE_THINKING", "").strip().lower()
+                    if judge_thinking not in {"enabled", "disabled"}:
+                        judge_thinking = ""
                     try:
-                        request_task = asyncio.create_task(asyncio.to_thread(
-                            judge_run.run_http,
-                            {
-                                "method": "POST", "url": judge_url, "json": judge_input,
-                                "headers": {
-                                    "Content-Type": "application/json",
-                                    "Authorization": "Bearer " + (os.environ.get("SCIENCE_AGENT_JUDGE_API_KEY") or os.environ["API_KEY"]),
+                        thinking_modes = ("enabled", "disabled") if judge_thinking == "enabled" else (judge_thinking,)
+                        for thinking_mode in thinking_modes:
+                            if thinking_mode:
+                                judge_input["thinking"] = {"type": thinking_mode}
+                            judge_attempts += 1
+                            request_task = asyncio.create_task(asyncio.to_thread(
+                                judge_run.run_http,
+                                {
+                                    "method": "POST", "url": judge_url, "json": judge_input,
+                                    "headers": {
+                                        "Content-Type": "application/json",
+                                        "Authorization": "Bearer " + (os.environ.get("SCIENCE_AGENT_JUDGE_API_KEY") or os.environ["API_KEY"]),
+                                    },
                                 },
-                            },
-                            timeout=float(os.environ.get("SCIENCE_AGENT_JUDGE_TIMEOUT", "180")),
-                        ))
-                        try:
-                            response = await asyncio.shield(request_task)
-                        except asyncio.CancelledError:
-                            # to_thread keeps running after cancellation. Wait before
-                            # deletion so it cannot create a Sandbox after cleanup.
+                                timeout=float(os.environ.get("SCIENCE_AGENT_JUDGE_TIMEOUT", "180")),
+                            ))
                             try:
-                                await request_task
-                            finally:
-                                raise asyncio.CancelledError
-                        raw_response = response["text"]
-                        judge_response_summary = raw_response[:500]
-                        if response["status_code"] >= 400:
-                            raise RuntimeError(f"Sandbox judge HTTP {response['status_code']}: {judge_response_summary}")
-                        body = json.loads(raw_response)
-                        choice = body["choices"][0]
-                        judge_finish_reason = _text(choice.get("finish_reason", ""))
-                        content = choice["message"]["content"]
-                        if isinstance(content, list):
-                            content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-                        content = _text(content).strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-                        judge_content_chars = len(content)
-                        parsed = json.loads(content)
-                        if next_protocol:
-                            correct = parsed["correct"]
-                            if not isinstance(correct, bool):
-                                raise ValueError(f"invalid judge result: {parsed!r}")
-                            judge_result = {"correct": correct, "score": 1.0 if correct else 0.0, "reason": str(parsed.get("reason", ""))}
-                        else:
-                            score = float(parsed["score"])
-                            if score not in (0.0, 1.0) or bool(parsed.get("correct")) != bool(score):
-                                raise ValueError(f"invalid judge result: {parsed!r}")
-                            judge_result = parsed
+                                response = await asyncio.shield(request_task)
+                            except asyncio.CancelledError:
+                                # to_thread keeps running after cancellation. Wait before
+                                # deletion so it cannot create a Sandbox after cleanup.
+                                try:
+                                    await request_task
+                                finally:
+                                    raise asyncio.CancelledError
+                            judge_connection_failures = 0
+                            raw_response = response["text"]
+                            judge_response_summary = raw_response[:500]
+                            if response["status_code"] >= 400:
+                                raise RuntimeError(f"Sandbox judge HTTP {response['status_code']}: {judge_response_summary}")
+                            try:
+                                judge_finish_reason = ""
+                                judge_content_chars = 0
+                                body = json.loads(raw_response)
+                                choice = body["choices"][0]
+                                judge_finish_reason = _text(choice.get("finish_reason", ""))
+                                content = choice["message"]["content"]
+                                if isinstance(content, list):
+                                    content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+                                content = _text(content).strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+                                judge_content_chars = len(content)
+                                parsed = json.loads(content)
+                                if not isinstance(parsed, dict) or not isinstance(parsed.get("correct"), bool):
+                                    raise ValueError(f"invalid judge result: {parsed!r}")
+                                if next_protocol:
+                                    correct = parsed["correct"]
+                                    judge_result = {"correct": correct, "score": 1.0 if correct else 0.0, "reason": str(parsed.get("reason", ""))}
+                                else:
+                                    score = float(parsed["score"])
+                                    if score not in (0.0, 1.0) or bool(parsed.get("correct")) != bool(score):
+                                        raise ValueError(f"invalid judge result: {parsed!r}")
+                                    judge_result = parsed
+                            except (ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
+                                if thinking_mode != "enabled":
+                                    raise
+                                judge_thinking_fallbacks += 1
+                                logger.warning(
+                                    "Science judge returned no valid grade with thinking enabled; "
+                                    "retrying with thinking disabled error_type=%s finish_reason=%s content_chars=%d",
+                                    type(exc).__name__, judge_finish_reason, judge_content_chars,
+                                )
+                                continue
+                            break
                         break
                     except Exception as exc:  # noqa: BLE001
                         judge_error = f"{type(exc).__name__}: {exc}"
+                        connection_failed = (
+                            isinstance(exc, SandboxGatewayError)
+                            and "proxy HTTP 502" in str(exc)
+                            and "Sandbox upstream connection failed" in str(exc)
+                        )
+                        judge_connection_failures = judge_connection_failures + 1 if connection_failed else 0
+                        # Grading saved text needs no recovered Python state or model acknowledgement.
+                        replace_sandbox = isinstance(exc, SandboxStateError) or judge_connection_failures >= 2
                         logger.warning(
                             "Science judge failure sandbox=%d/3 attempt=%d/%d url=%s model=%s prediction_chars=%d "
                             "missing_prediction=%s empty_prediction=%s error=%s response=%s next_retry_s=%s",
@@ -294,8 +362,11 @@ class ScienceLegacyReactAgent(ChatAgent):
                             prediction_empty,
                             judge_error,
                             judge_response_summary[:500],
-                            retry_delays[attempt] if attempt < len(retry_delays) else None,
+                            retry_delays[attempt] if not replace_sandbox and attempt < len(retry_delays) else None,
                         )
+                        if replace_sandbox:
+                            logger.warning("Judge Sandbox unusable; ending retries in this instance error_type=%s", type(exc).__name__)
+                            break
                         if attempt < len(retry_delays):
                             await asyncio.sleep(retry_delays[attempt])
             finally:
@@ -324,6 +395,7 @@ class ScienceLegacyReactAgent(ChatAgent):
                 "science_judge_model": judge_model,
                 "science_judge_backend": "gateway_sandbox",
                 "science_judge_attempts": torch.tensor(float(judge_attempts), dtype=torch.float32),
+                "science_judge_thinking_fallbacks": torch.tensor(float(judge_thinking_fallbacks), dtype=torch.float32),
                 "science_judge_sandbox_restarts": torch.tensor(float(sandbox_attempt), dtype=torch.float32),
                 "science_judge_error": judge_error,
                 "science_judge_response": judge_response_summary,

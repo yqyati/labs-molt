@@ -186,11 +186,26 @@ class ScienceLegacyReactAgent(ChatAgent):
         judge_finish_reason = ""
         judge_content_chars = 0
         if next_protocol:
-            judge_system_prompt = ("You are a strict grader for physics problems. Given a problem and a candidate solution, decide whether the candidate answer is correct. Be strict: the final answer must match the ground truth (allow equivalent forms).")
+            judge_system_prompt = ("You are a strict grader for problems across all academic disciplines. Given a problem and a candidate solution, decide whether the candidate answer is correct. Be strict: the final answer must match the ground truth (allow equivalent forms).")
             judge_user_prompt = ("You will output ONLY valid JSON with this schema:\n{\"correct\": true/false, \"reason\": \"one-sentence reason\"}\n\n" f"Problem:\n{ctx.prompt}\n\nCandidate answer (model output):\n{prediction}\n\nGround truth answer:\n{reference}\n")
         else:
-            judge_system_prompt = ("Judge whether the candidate answer is scientifically correct and answers the question. Accept equivalent wording and reasoning. Return only JSON: {\"score\": 1 or 0, \"correct\": true or false, \"reason\": \"short explanation\"}. Use score 1 only when the answer is substantially correct.")
-            judge_user_prompt = json.dumps({"question": ctx.prompt, "reference_answer": reference, "candidate_answer": prediction}, ensure_ascii=False)
+            judge_system_prompt = (
+                "You are a grader for problems across all academic disciplines. "
+                "Judge whether the candidate answer is substantially correct and answers the question, "
+                "using the reference answer as the grading reference. "
+                "Accept equivalent wording, reasoning, and mathematical expressions. "
+                "Make your grading decision without unnecessary deliberation, "
+                "and return only the requested JSON with a brief reason."
+            )
+            judge_user_prompt = (
+                'You will output ONLY valid JSON with this schema:\n'
+                '{"score": 1 or 0, "correct": true or false, "reason": "one-sentence reason"}\n\n'
+                "Use score 1 and correct true only when the answer is substantially correct.\n"
+                "Otherwise, use score 0 and correct false.\n\n"
+                f"Problem:\n{ctx.prompt}\n\n"
+                f"Candidate answer (model output):\n{prediction}\n\n"
+                f"Ground truth answer:\n{reference}\n"
+            )
         for attempt in range(3):
             judge_input = {
                 "model": judge_model,
