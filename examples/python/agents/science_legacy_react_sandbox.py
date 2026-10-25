@@ -1,9 +1,13 @@
-"""Isolated Sandbox evaluation adapter with a Sandbox-routed API judge.
+"""Isolated Sandbox evaluation adapter with an API judge and direct fallback.
 
 The legacy agent owns the complete loop (model -> tools -> tool messages ->
 model), while Molt owns the policy endpoint and trajectory capture.  This
 module deliberately keeps the science-agent implementation out of Molt's
 trainer: it only bridges ChatContext to the existing ``_run`` contract.
+
+After Sandbox judge retries are exhausted, the saved answer is graded directly.
+SCIENCE_AGENT_JUDGE_FALLBACK_BASE_URL / MODEL / API_KEY (with the same prefix)
+override the internal fallback service; an empty fallback base URL disables it.
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ import re
 import sys
 from pathlib import Path
 
+import httpx
 import torch
 
 from molt.agents import ChatAgent, ChatAgentRunner, ChatContext, Result
@@ -254,16 +259,27 @@ class ScienceLegacyReactAgent(ChatAgent):
             )
         # First try the task-owned Sandbox; replacements only judge the saved answer.
         judge_run = shared_sandbox_run()
-        retry_delays = (1, 5, 10, 30, 60, 180, 180, 180)
+        retry_delays = (1, 5, 10, 30, 60, 180)
         judge_attempts = 0
         judge_thinking_fallbacks = 0
-        for sandbox_attempt in range(3):
-            if sandbox_attempt:
-                logger.warning("Retrying saved answer in replacement judge Sandbox %d/2", sandbox_attempt)
+        judge_backend = "gateway_sandbox"
+        judge_primary_error = ""
+        fallback_base = os.environ.get("SCIENCE_AGENT_JUDGE_FALLBACK_BASE_URL", "http://s-20261020163637-mpm6m.ailab-agentshared.pjh-service.org.cn/v1").rstrip("/")
+        for sandbox_attempt in range(3 if fallback_base else 2):
+            direct = sandbox_attempt == 2
+            if direct:
+                judge_primary_error = judge_error
+                judge_response_summary = ""
+                judge_backend = "direct_fallback"
+                judge_url = fallback_base + "/chat/completions"
+                judge_model = os.environ.get("SCIENCE_AGENT_JUDGE_FALLBACK_MODEL", "DeepSeek-V4.1-Flash-1017")
+                logger.warning("Sandbox judge retries exhausted; judging saved answer directly model=%s", judge_model)
+            elif sandbox_attempt:
+                logger.warning("Retrying saved answer in replacement judge Sandbox %d/1", sandbox_attempt)
                 judge_run = AgentSandboxRun()
             judge_connection_failures = 0
             try:
-                for attempt in range(len(retry_delays) + 1):
+                for attempt in range(1 if direct else len(retry_delays) + 1):
                     judge_input = {
                         "model": judge_model,
                         "messages": [{"role": "system", "content": judge_system_prompt}, {"role": "user", "content": judge_user_prompt}],
@@ -277,34 +293,46 @@ class ScienceLegacyReactAgent(ChatAgent):
                     try:
                         thinking_modes = ("enabled", "disabled") if judge_thinking == "enabled" else (judge_thinking,)
                         for thinking_mode in thinking_modes:
-                            if thinking_mode:
+                            if direct:
+                                judge_input["chat_template_kwargs"] = {"thinking": thinking_mode != "disabled"}
+                                if thinking_mode != "disabled":
+                                    judge_input["chat_template_kwargs"]["reasoning_effort"] = 20
+                            elif thinking_mode:
                                 judge_input["thinking"] = {"type": thinking_mode}
                             judge_attempts += 1
-                            request_task = asyncio.create_task(asyncio.to_thread(
-                                judge_run.run_http,
-                                {
-                                    "method": "POST", "url": judge_url, "json": judge_input,
-                                    "headers": {
-                                        "Content-Type": "application/json",
-                                        "Authorization": "Bearer " + (os.environ.get("SCIENCE_AGENT_JUDGE_API_KEY") or os.environ["API_KEY"]),
+                            if direct:
+                                # Internal service is reachable directly; do not route through environment proxies.
+                                async with httpx.AsyncClient(trust_env=False, timeout=float(os.environ.get("SCIENCE_AGENT_JUDGE_TIMEOUT", "180"))) as client:
+                                    reply = await client.post(judge_url, json=judge_input, headers={
+                                        "Authorization": "Bearer " + os.environ.get("SCIENCE_AGENT_JUDGE_FALLBACK_API_KEY", "EMPTY"),
+                                    })
+                                response = {"status_code": reply.status_code, "text": reply.text}
+                            else:
+                                request_task = asyncio.create_task(asyncio.to_thread(
+                                    judge_run.run_http,
+                                    {
+                                        "method": "POST", "url": judge_url, "json": judge_input,
+                                        "headers": {
+                                            "Content-Type": "application/json",
+                                            "Authorization": "Bearer " + (os.environ.get("SCIENCE_AGENT_JUDGE_API_KEY") or os.environ["API_KEY"]),
+                                        },
                                     },
-                                },
-                                timeout=float(os.environ.get("SCIENCE_AGENT_JUDGE_TIMEOUT", "180")),
-                            ))
-                            try:
-                                response = await asyncio.shield(request_task)
-                            except asyncio.CancelledError:
-                                # to_thread keeps running after cancellation. Wait before
-                                # deletion so it cannot create a Sandbox after cleanup.
+                                    timeout=float(os.environ.get("SCIENCE_AGENT_JUDGE_TIMEOUT", "180")),
+                                ))
                                 try:
-                                    await request_task
-                                finally:
-                                    raise asyncio.CancelledError
+                                    response = await asyncio.shield(request_task)
+                                except asyncio.CancelledError:
+                                    # to_thread keeps running after cancellation. Wait before
+                                    # deletion so it cannot create a Sandbox after cleanup.
+                                    try:
+                                        await request_task
+                                    finally:
+                                        raise asyncio.CancelledError
                             judge_connection_failures = 0
                             raw_response = response["text"]
                             judge_response_summary = raw_response[:500]
                             if response["status_code"] >= 400:
-                                raise RuntimeError(f"Sandbox judge HTTP {response['status_code']}: {judge_response_summary}")
+                                raise RuntimeError(f"Judge HTTP {response['status_code']}: {judge_response_summary}")
                             try:
                                 judge_finish_reason = ""
                                 judge_content_chars = 0
@@ -338,6 +366,7 @@ class ScienceLegacyReactAgent(ChatAgent):
                                 )
                                 continue
                             break
+                        judge_error = ""
                         break
                     except Exception as exc:  # noqa: BLE001
                         judge_error = f"{type(exc).__name__}: {exc}"
@@ -350,11 +379,12 @@ class ScienceLegacyReactAgent(ChatAgent):
                         # Grading saved text needs no recovered Python state or model acknowledgement.
                         replace_sandbox = isinstance(exc, SandboxStateError) or judge_connection_failures >= 2
                         logger.warning(
-                            "Science judge failure sandbox=%d/3 attempt=%d/%d url=%s model=%s prediction_chars=%d "
+                            "Science judge failure backend=%s sandbox=%d/2 attempt=%d/%d url=%s model=%s prediction_chars=%d "
                             "missing_prediction=%s empty_prediction=%s error=%s response=%s next_retry_s=%s",
-                            sandbox_attempt + 1,
+                            judge_backend,
+                            min(sandbox_attempt + 1, 2),
                             attempt + 1,
-                            len(retry_delays) + 1,
+                            1 if direct else len(retry_delays) + 1,
                             judge_url,
                             judge_model,
                             len(prediction),
@@ -362,15 +392,17 @@ class ScienceLegacyReactAgent(ChatAgent):
                             prediction_empty,
                             judge_error,
                             judge_response_summary[:500],
-                            retry_delays[attempt] if not replace_sandbox and attempt < len(retry_delays) else None,
+                            retry_delays[attempt] if not direct and not replace_sandbox and attempt < len(retry_delays) else None,
                         )
+                        if direct:
+                            break
                         if replace_sandbox:
                             logger.warning("Judge Sandbox unusable; ending retries in this instance error_type=%s", type(exc).__name__)
                             break
                         if attempt < len(retry_delays):
                             await asyncio.sleep(retry_delays[attempt])
             finally:
-                if sandbox_attempt:
+                if sandbox_attempt and not direct:
                     try:
                         await asyncio.to_thread(judge_run.close)
                     except Exception:
@@ -393,10 +425,12 @@ class ScienceLegacyReactAgent(ChatAgent):
                 "science_judge_score": torch.tensor(reward, dtype=torch.float32),
                 "science_judge_valid": torch.tensor(float(judge_result is not None), dtype=torch.float32),
                 "science_judge_model": judge_model,
-                "science_judge_backend": "gateway_sandbox",
+                "science_judge_backend": judge_backend,
+                "science_judge_direct_fallback": torch.tensor(float(direct), dtype=torch.float32),
+                "science_judge_primary_error": judge_primary_error,
                 "science_judge_attempts": torch.tensor(float(judge_attempts), dtype=torch.float32),
                 "science_judge_thinking_fallbacks": torch.tensor(float(judge_thinking_fallbacks), dtype=torch.float32),
-                "science_judge_sandbox_restarts": torch.tensor(float(sandbox_attempt), dtype=torch.float32),
+                "science_judge_sandbox_restarts": torch.tensor(float(min(sandbox_attempt, 1)), dtype=torch.float32),
                 "science_judge_error": judge_error,
                 "science_judge_response": judge_response_summary,
                 "science_judge_finish_reason": judge_finish_reason,

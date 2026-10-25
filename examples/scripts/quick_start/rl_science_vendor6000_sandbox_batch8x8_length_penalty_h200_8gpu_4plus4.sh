@@ -9,7 +9,11 @@ SCI_RESEARCH_ROOT="${SCI_RESEARCH_ROOT:-$GPFS2_ROOT/scientific_reasoning_and_res
 export SCIENCE_AGENT_ROOT="${SCIENCE_AGENT_ROOT:-$GPFS2_ROOT/yangqingyu/workspace/harness/science-agent-sandbox}"
 if [[ "${SCIENCE_TRAIN_SANDBOX_ENV_LOADED:-0}" != "1" ]]; then
   export SCIENCE_TRAIN_SANDBOX_ENV_LOADED=1
-  exec bash "$SCIENCE_AGENT_ROOT/run_sandbox_harness.sh" bash "${BASH_SOURCE[0]}" "$@"
+  exec bash "$SCIENCE_AGENT_ROOT/run_sandbox_harness.sh" env \
+    SCIENCE_AGENT_JUDGE_MODEL="${SCIENCE_AGENT_JUDGE_MODEL:-bailian/deepseek-v4.1-flash}" \
+    SCIENCE_AGENT_JUDGE_THINKING="${SCIENCE_AGENT_JUDGE_THINKING:-enabled}" \
+    SCIENCE_AGENT_JUDGE_MAX_TOKENS="${SCIENCE_AGENT_JUDGE_MAX_TOKENS:-6000}" \
+    bash "${BASH_SOURCE[0]}" "$@"
 fi
 unset SCIENCE_TRAIN_SANDBOX_ENV_LOADED
 

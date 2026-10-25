@@ -155,7 +155,7 @@ def _inference_sampling_params(sp) -> dict:
     ):
         v = getattr(sp, name, None)
         fields[name] = default if v is None else v
-    for name in ("stop", "stop_token_ids"):
+    for name in ("stop", "stop_token_ids", "bad_words"):
         v = getattr(sp, name, None)
         if v:
             fields[name] = list(v)

@@ -293,7 +293,9 @@ def test_compaction_starts_a_fresh_segment():
 
 
 @pytest.mark.parametrize("masking", [None, "0", "1"])
-def test_masked_history_rerender_preserves_tool_protocol(monkeypatch, masking):
+@pytest.mark.parametrize("compaction", ["0", "1"])
+def test_masked_history_rerender_preserves_tool_protocol(monkeypatch, masking, compaction):
+    monkeypatch.setenv("AGENT_CONTEXT_COMPACTION", compaction)
     if masking is None:
         monkeypatch.delenv("AGENT_OBSERVATION_MASKING", raising=False)
     else:
@@ -312,7 +314,7 @@ def test_masked_history_rerender_preserves_tool_protocol(monkeypatch, masking):
     rendered, images = cs._messages_to_chat(state, masked)
     expected = copy.deepcopy(masked)
     expected[1]["tool_calls"][0]["function"]["arguments"] = {"code": "1+1"}
-    if masking != "1":
+    if masking != "1" and compaction != "1":
         expected = [{"role": m["role"], "content": m["content"]} for m in masked]
     assert rendered == expected
     assert masked[1]["tool_calls"][0]["function"]["arguments"] == '{"code":"1+1"}'

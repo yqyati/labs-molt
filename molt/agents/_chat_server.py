@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import os
 import time
 from copy import deepcopy
@@ -251,12 +252,13 @@ def _messages_to_chat(state: ChatServerState, messages: list) -> tuple[list, lis
     """OpenAI messages -> (ChatML rows with a literal ``<image>`` per image, loaded PIL images).
     Split the literal placeholder into structured content for models whose image token isn't
     ``<image>`` (Qwen-VL), so the template renders it — mirrors the RL dataset's rendering."""
-    preserve_tool_protocol = os.environ.get("AGENT_OBSERVATION_MASKING", "0").lower() in {"1", "true", "yes"}
+    compaction = os.environ.get("AGENT_CONTEXT_COMPACTION", "0").lower() in {"1", "true", "yes"}
+    preserve_tool_protocol = compaction or os.environ.get("AGENT_OBSERVATION_MASKING", "0").lower() in {"1", "true", "yes"}
     chat, pil_images = [], []
     for m in messages:
         text, imgs = _content_to_text_and_images(m.get("content"))
         row = {"role": m.get("role"), "content": text}
-        # Isolate masked-history rendering from the existing unmasked path.
+        # Rewritten histories need the actual call/response protocol, including in non-masking mode.
         if preserve_tool_protocol:
             for key in ("tool_calls", "reasoning_content", "reasoning", "tool_call_id", "name"):
                 if m.get(key) is not None:
@@ -267,9 +269,16 @@ def _messages_to_chat(state: ChatServerState, messages: list) -> tuple[list, lis
                     function = call.get("function", call)
                     if isinstance(function.get("arguments"), str):
                         function["arguments"] = json.loads(function["arguments"])
+        if compaction and row["role"] == "assistant":
+            # Raw completions carry framing that the template adds again during replay.
+            row["content"] = re.sub(r"(?:\s*<\|(?:im_end|endoftext)\|>)+\s*$", "", text).strip()
+            if not row.get("reasoning_content") and "</think>" in row["content"]:
+                reasoning, row["content"] = row["content"].split("</think>", 1)
+                row["reasoning_content"] = reasoning.removeprefix("<think>").strip()
+                row["content"] = row["content"].strip()
         chat.append(row)
         pil_images.extend(imgs)
-    if state.expand_image_placeholder:
+    if state.expand_image_placeholder and pil_images:
         chat = [split_image_placeholder(m) for m in chat]
     return chat, pil_images
 
@@ -295,9 +304,17 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     # its messages extend last_messages; a compaction changes that prefix. Also false on turn 1.
     extends = bool(session.trajectories) and messages[: len(session.last_messages)] == session.last_messages
     chat, pil_images = _messages_to_chat(state, messages)
+    # Text-only turns may quote media markers, but cannot supply their visual features.
+    image_token = getattr(state.processor, "image_token", None) if not pil_images else None
+    if image_token:
+        sp.bad_words = list(dict.fromkeys([*(getattr(sp, "bad_words", None) or []), image_token]))
     full = state.processor.apply_chat_template(chat, tokenize=False, add_generation_prompt=True, **kwargs)
+    if image_token:
+        full = full.replace(image_token, image_token.replace("<", "< "))
     if extends:
         prefix = state.processor.apply_chat_template(chat[:-1], tokenize=False, add_generation_prompt=False, **kwargs)
+        if image_token:
+            prefix = prefix.replace(image_token, image_token.replace("<", "< "))
         # The suffix slice below is only sound when the prior turns render the same in `full` and
         # `prefix`. A template can instead rewrite history in place — e.g. Qwen3 re-renders a prior
         # assistant turn WITHOUT its <think> block once a newer user query follows — and the slice
