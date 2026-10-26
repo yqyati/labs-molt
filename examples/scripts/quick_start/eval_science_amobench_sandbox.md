@@ -19,7 +19,7 @@ into the recipe. For RJob use the same runtime image and GPFS mounts as HLE,
 allocate `TP` GPUs, and run this entry. Do not pass `--private-machine` when
 using `ailab_ai4sgi_pool`. No job is submitted by the entry itself.
 
-Defaults: 120k (122880) total trajectory tokens, temperature 0.6, top_p 1,
+Defaults: 120k (122880) total trajectory tokens, temperature 1.0, top_p 0.95,
 non-masking, search/visit/python/scholar tools. This measures agent performance;
 the referenced pure-inference script disallows tools, so its scores use a
 different evaluation setup.
