@@ -202,6 +202,18 @@ Common RL switches:
 | Dump / replay a rollout batch | `--train.rollout_dump_dir <dir>` then `--train.rollout_replay_dir <dir>` re-runs training on it without regenerating |
 | Check weight-update coverage | `--train.check_weight_update_equal` warns which vLLM params a broadcast left stale |
 
+RL policy checkpoint saves can retry disk-space or quota failures with
+`MOLT_CKPT_FALLBACK_ROOT=/path/on/another/filesystem`. Every policy rank switches
+together, and subsequent saves in that process use the fallback. This covers
+rolling checkpoints, optional periodic HF snapshots and the final HF export.
+Absolute output paths are mirrored under the fallback root to keep runs separate;
+the actual successful path is logged. Resume using that path as `--ckpt.path`
+(the directory containing `_actor`), since the original directory is not redirected.
+Failed partial files at the original location are left for inspection. An empty
+fallback root disables retries; a failure at the fallback is reported normally.
+The science length-penalty and Vendor Flash recipes set a shared fallback root by
+default; other recipes must opt in with this environment variable.
+
 #### Optional group-relative length penalty
 
 Add `--reward.group_length_penalty.enable` to a multi-sample GRPO, Dr.GRPO,
@@ -721,6 +733,28 @@ Constraints:
   resume checkpoints stay full-weight, so resuming is unchanged.
 
 </details>
+
+### FrontierScience Olympiad evaluation
+
+`examples/scripts/quick_start/eval_science_fso_sandbox.sh` loads local Sandbox
+credentials and evaluates a consolidated HF checkpoint on the 100 FSO questions.
+It defaults to TP=2, 16 workers, no observation masking, no compaction, and no
+forced finalization. Both context controls can be enabled independently.
+
+```bash
+MODEL_PATH=/path/to/hf/model \
+AGENT_CONTEXT_COMPACTION=0 AGENT_EVAL_FORCE_FINALIZE=1 \
+bash examples/scripts/quick_start/eval_science_fso_sandbox.sh
+```
+
+Use `PREPARE_ONLY=1` without a model to validate data conversion. Override
+`FSO_SOURCE` or `OUTPUT_ROOT` as needed. Final responses retain all answer parts,
+labels, and units; the binary Olympiad judge accepts equivalent expressions,
+chemical names, unit conversions, and rounding to the reference precision.
+Judge output uses the shared JSON parser, retry, and direct-fallback mechanism.
+This is a tool-enabled evaluation adapted from the supplied reference scripts,
+not an execution of the official evaluator. Full messages and per-question
+judgments are saved under `OUTPUT_ROOT/rollout_dump`.
 
 ## ✅ Validation
 

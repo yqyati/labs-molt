@@ -130,6 +130,7 @@ class ScienceLegacyReactAgent(ChatAgent):
                 raise asyncio.CancelledError
         raw_prediction = _text(result.get("prediction") if isinstance(result, dict) else result)
         amo_protocol = os.environ.get("SCIENCE_AGENT_EVAL_BENCHMARK", "") == "amobench"
+        fso_protocol = os.environ.get("SCIENCE_AGENT_EVAL_BENCHMARK", "") == "fso"
         next_protocol = os.environ.get("SCIENCE_AGENT_NEXT_HLE_EVAL_PROTOCOL", "0").lower() in {"1", "true", "yes"}
         prediction = _extract_hle_candidate(raw_prediction) if next_protocol else raw_prediction
         if amo_protocol:
@@ -139,6 +140,13 @@ class ScienceLegacyReactAgent(ChatAgent):
             spans = find_boxed_spans(prediction)
             if spans:
                 prediction = "\n".join(span.canonical for span in spans)
+            next_protocol = True
+        if fso_protocol:
+            # Keep the complete final response: labels and units outside boxes can
+            # disambiguate multiple requested quantities. Never use HLE's last-box selector.
+            prediction = raw_prediction.rsplit("</think>", 1)[-1].strip()
+            for token in ("<|im_start|>", "<|im_end|>", "<|endoftext|>"):
+                prediction = prediction.replace(token, "")
             next_protocol = True
         if prediction.strip().casefold() in {"your answer", "your final answer"}:
             prediction = ""
@@ -234,6 +242,19 @@ class ScienceLegacyReactAgent(ChatAgent):
                 "Leading zeros are harmless but a different value is incorrect.\n"
                 f"Problem:\n{ctx.prompt}\n\nReference answer:\n{reference}\n\n"
                 f"Attempted extracted answer:\n{prediction}\n\n"
+                'Return only valid JSON: {"correct": true/false, "reason": "brief explanation"}.'
+            )
+        elif fso_protocol:
+            judge_system_prompt = "You are a strict but fair grader for science olympiad problems."
+            judge_user_prompt = (
+                "Evaluate the attempted final answer against the reference answer. "
+                "Mark correct only if it fully matches or is equivalent to the reference. "
+                "Accept equivalent algebraic expressions, compound names or formulas, and unit conversions. "
+                "Accept numerical rounding to the precision of the reference "
+                "(for example, 6.69 is equivalent to 6.7). "
+                "For multiple requested answers, check every part and its correspondence to the question.\n\n"
+                f"Problem:\n{ctx.prompt}\n\nReference answer:\n{reference}\n\n"
+                f"Attempted answer:\n{prediction}\n\n"
                 'Return only valid JSON: {"correct": true/false, "reason": "brief explanation"}.'
             )
         elif next_protocol:

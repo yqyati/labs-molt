@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Evaluate an HF checkpoint on AMO with the shared agent and isolated Sandbox tools.
+# Evaluate an HF checkpoint on AMO or FSO with the shared agent and Sandbox tools.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOLT_REPO="${MOLT_PATH:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
@@ -7,11 +7,24 @@ WORKSPACE_ROOT="$(dirname "$MOLT_REPO")"
 GPFS2_ROOT="${GPFS2_ROOT:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2}"
 SCI_RESEARCH_ROOT="$GPFS2_ROOT/scientific_reasoning_and_research"
 HARNESS_ROOT="${SCIENCE_AGENT_ROOT:-$WORKSPACE_ROOT/harness/science-agent-sandbox}"
-AMO_SOURCE="${AMO_SOURCE:-$SCI_RESEARCH_ROOT/jiangyichen/p1-shared-2/eval/math/amobench.jsonl}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$GPFS2_ROOT/yangqingyu/eval/molt_amo_sandbox/amo-$(date +%Y%m%d-%H%M%S)}"
-EVAL_DATASET="$OUTPUT_ROOT/amobench_molt.jsonl"
+export SCIENCE_AGENT_EVAL_BENCHMARK="${SCIENCE_AGENT_EVAL_BENCHMARK:-amobench}"
+case "$SCIENCE_AGENT_EVAL_BENCHMARK" in
+  amobench)
+    EVAL_SOURCE="${AMO_SOURCE:-$SCI_RESEARCH_ROOT/jiangyichen/p1-shared-2/eval/math/amobench.jsonl}"
+    PREPARER=prepare_amobench.py
+    DEFAULT_OUTPUT="$GPFS2_ROOT/yangqingyu/eval/molt_amo_sandbox/amo-$(date +%Y%m%d-%H%M%S)"
+    ;;
+  fso)
+    EVAL_SOURCE="${FSO_SOURCE:-$SCI_RESEARCH_ROOT/jiangyichen/p1-shared-2/eval/frontierscience/FrontierScience_Olympiad.jsonl}"
+    PREPARER=prepare_frontierscience_olympiad.py
+    DEFAULT_OUTPUT="$GPFS2_ROOT/yangqingyu/eval/molt_fso_sandbox/fso-$(date +%Y%m%d-%H%M%S)"
+    ;;
+  *) echo "Unsupported evaluation benchmark: $SCIENCE_AGENT_EVAL_BENCHMARK" >&2; exit 2 ;;
+esac
+OUTPUT_ROOT="${OUTPUT_ROOT:-$DEFAULT_OUTPUT}"
+EVAL_DATASET="$OUTPUT_ROOT/${SCIENCE_AGENT_EVAL_BENCHMARK}_molt.jsonl"
 mkdir -p "$OUTPUT_ROOT"
-python3 "$MOLT_REPO/examples/python/utils/prepare_amobench.py" --source "$AMO_SOURCE" --output "$EVAL_DATASET"
+python3 "$MOLT_REPO/examples/python/utils/$PREPARER" --source "$EVAL_SOURCE" --output "$EVAL_DATASET"
 if [[ "${PREPARE_ONLY:-0}" == 1 ]]; then exit 0; fi
 MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to a consolidated HF model directory}"
 test -f "$MODEL_PATH/config.json"
@@ -30,7 +43,6 @@ INSTALLER="${QWEN_AGENT_INSTALLER:-$SCI_RESEARCH_ROOT/yangqingyu/rft/offline_whe
 bash "$INSTALLER" "$WHEEL_DIR"
 export SCIENCE_AGENT_MODEL_PATH="$MODEL_PATH"
 export SCIENCE_AGENT_GATEWAY_URL="${SCIENCE_AGENT_GATEWAY_URL:-http://100.102.21.127:8765}"
-export SCIENCE_AGENT_EVAL_BENCHMARK=amobench
 export SCIENCE_AGENT_NEXT_HLE_EVAL_PROTOCOL=0
 export QWEN_API_MAX_OUTPUT_TOKENS="$MAX_NEW_TOKENS"
 export SCIENCE_AGENT_JUDGE_BASE_URL="${SCIENCE_AGENT_JUDGE_BASE_URL:-${API_BASE%/}}"
@@ -49,7 +61,8 @@ export SCIENCE_AGENT_SCHOLAR_MAX_RESULTS=0 SCIENCE_AGENT_SCHOLAR_SNIPPET_CHARS=0
 export AGENT_OBSERVATION_MASKING="${AGENT_OBSERVATION_MASKING:-0}"
 export AGENT_CONTEXT_COMPACTION="${AGENT_CONTEXT_COMPACTION:-0}"
 export AGENT_CONTEXT_COMPACT_THRESHOLD_TOKENS="${AGENT_CONTEXT_COMPACT_THRESHOLD_TOKENS:-57344}"
-export OPENAI_COMPAT_USE_SYSTEM_PROMPT=1 AGENT_TOOL_BACKEND=local AGENT_EVAL_FORCE_FINALIZE=0
+export OPENAI_COMPAT_USE_SYSTEM_PROMPT=1 AGENT_TOOL_BACKEND=local
+export AGENT_EVAL_FORCE_FINALIZE="${AGENT_EVAL_FORCE_FINALIZE:-0}"
 export SCIENCE_AGENT_TRACE_FILE="$OUTPUT_ROOT/sandbox_trace.jsonl"
 export SCIENCE_AGENT_SANDBOX_RECOVERY="${SCIENCE_AGENT_SANDBOX_RECOVERY:-1}"
 export TASK_TIMEOUT_SEC="${TASK_TIMEOUT_SEC:-9000}"
@@ -58,7 +71,7 @@ export WANDB_DISABLED=true RAY_USAGE_STATS_ENABLED=0 VLLM_WORKER_MULTIPROC_METHO
 python3 -u "$HARNESS_ROOT/sandbox_smoke.py" --search --judge 2>&1 | tee "$OUTPUT_ROOT/sandbox_preflight.log"
 
 cd "$MOLT_REPO"
-echo "Molt AMO eval: rows=50 model=$MODEL_PATH dataset=$EVAL_DATASET output=$OUTPUT_ROOT tp=$TP workers=$MAX_WORKERS" >&2
+echo "Molt eval: benchmark=$SCIENCE_AGENT_EVAL_BENCHMARK model=$MODEL_PATH dataset=$EVAL_DATASET output=$OUTPUT_ROOT tp=$TP workers=$MAX_WORKERS" >&2
 python3 -u -m molt.cli.train_rl_ray \
   --actor.model_name_or_path "$MODEL_PATH" \
   --data.prompt_dataset "$EVAL_DATASET" \

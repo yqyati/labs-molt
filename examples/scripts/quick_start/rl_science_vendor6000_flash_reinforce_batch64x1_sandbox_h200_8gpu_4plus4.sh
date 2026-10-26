@@ -24,6 +24,7 @@ GPFS1_USER_ROOT="${GPFS1_USER_ROOT:-/mnt/shared-storage-user/ai4sgi-gpfs1/yangqi
 RUN_ROOT="${RUN_ROOT:-$GPFS1_USER_ROOT/workspace/labs-molt/runs/$RUN_NAME}"
 LOG_ROOT="${LOG_ROOT:-$RUN_ROOT/logs}"
 SAVE_ROOT="${SAVE_ROOT:-$RUN_ROOT/checkpoint}"
+export MOLT_CKPT_FALLBACK_ROOT="${MOLT_CKPT_FALLBACK_ROOT-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/scientific_reasoning_and_research/yangqingyu/molt_checkpoints}"
 MAX_SAMPLES="${MAX_SAMPLES:-3443}"
 
 mkdir -p "$LOG_ROOT" "$SAVE_ROOT"

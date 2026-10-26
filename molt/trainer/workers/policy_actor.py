@@ -16,6 +16,7 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
+import errno
 import os
 import socket
 import time
@@ -935,6 +936,24 @@ class PolicyModelActor(BaseModelActor):
         torch.cuda.synchronize()
         return status
 
+    def _save_with_storage_fallback(self, save, path_key, path, **kwargs):
+        """Retry space/quota failures once, mirroring absolute paths under the fallback root."""
+        fallback_root = os.environ.get("MOLT_CKPT_FALLBACK_ROOT", "")
+        original = os.path.abspath(path)
+        fallback = os.path.join(os.path.abspath(fallback_root), original.lstrip(os.sep)) if fallback_root else None
+        destination = fallback if fallback and getattr(self, "_checkpoint_fallback_active", False) else path
+        try:
+            save(**{path_key: destination}, **kwargs)
+        except OSError as exc:
+            if exc.errno not in (errno.ENOSPC, errno.EDQUOT) or not fallback or destination == fallback:
+                raise
+            self.strategy.print(f"Checkpoint storage full at {path}; retrying at {fallback}")
+            save(**{path_key: fallback}, **kwargs)
+            destination = fallback
+            self._checkpoint_fallback_active = True
+        self.strategy.print(f"Checkpoint saved at {destination}")
+        return destination
+
     def export_hf_model(self):
         """Export HF safetensors snapshot to ckpt.output_dir.
 
@@ -944,10 +963,9 @@ class PolicyModelActor(BaseModelActor):
         """
         args = self.strategy.args
 
-        self.strategy.save_model(
-            self.actor,
-            self.tokenizer,
-            args.ckpt.output_dir,
+        self._save_with_storage_fallback(
+            self.strategy.save_model, "output_dir", args.ckpt.output_dir,
+            model=self.actor, tokenizer=self.tokenizer,
         )
 
     def forward(self, experience) -> torch.Tensor:
@@ -994,13 +1012,10 @@ class PolicyModelActor(BaseModelActor):
     def save_checkpoint(self, tag, client_states=None, metric_value=None, metric_key=None):
         args = self.strategy.args
         client_states = client_states or {}
-        self.strategy.save_ckpt(
-            self.actor.model,
-            os.path.join(args.ckpt.path, "_actor"),
-            tag,
-            args.ckpt.dcp_max_num,
-            args.ckpt.max_mem,
-            client_states,
+        self._save_with_storage_fallback(
+            self.strategy.save_ckpt, "ckpt_path", os.path.join(args.ckpt.path, "_actor"),
+            model=self.actor.model, tag=tag, max_num=args.ckpt.dcp_max_num,
+            max_mem=args.ckpt.max_mem, client_states=client_states,
             metric_value=metric_value,
             metric_key=metric_key,
             optimizer=self.actor_optim if args.ckpt.save_optimizer else None,
@@ -1010,6 +1025,9 @@ class PolicyModelActor(BaseModelActor):
             # Versioned HF export mirrors the DCP layout (_actor/<tag>) and gets its own
             # recency pruning, so save_hf can run every step without unbounded disk growth.
             hf_root = os.path.join(args.ckpt.path, "_hf")
-            self.strategy.save_model(self.actor, self.tokenizer, os.path.join(hf_root, tag))
-            self.strategy.prune_checkpoints(hf_root, tag, args.ckpt.max_num, args.ckpt.max_mem)
+            saved = self._save_with_storage_fallback(
+                self.strategy.save_model, "output_dir", os.path.join(hf_root, tag),
+                model=self.actor, tokenizer=self.tokenizer,
+            )
+            self.strategy.prune_checkpoints(os.path.dirname(saved), tag, args.ckpt.max_num, args.ckpt.max_mem)
         torch_dist_barrier_and_cuda_sync()

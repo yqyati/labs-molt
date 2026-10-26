@@ -24,9 +24,11 @@ unwrapping, rank/mesh info, and rank-0 logging.
 """
 
 import contextlib
+import errno
 import json
 import math
 import os
+import re
 
 import torch
 import torch.distributed as dist
@@ -40,6 +42,37 @@ class CheckpointManager:
 
     def __init__(self, strategy) -> None:
         self.strategy = strategy
+
+    @contextlib.contextmanager
+    def _checkpoint_write(self):
+        """Let every rank observe an I/O failure before starting the next collective."""
+        error = None
+        try:
+            yield
+        except BaseException as exc:
+            error = exc
+        status = None
+        if error is not None:
+            # DCP wraps per-rank OSErrors in CheckpointException (a BaseException).
+            errors = [failure[0] for failure in getattr(error, "failures", {}).values()] or [error]
+            full = all(
+                (isinstance(exc, OSError) and exc.errno in (errno.ENOSPC, errno.EDQUOT))
+                or bool(re.search(r"\[Errno (28|122)\]", str(exc)))
+                for exc in errors
+            )
+            status = (full, str(error))
+        statuses = [status]
+        if dist.is_initialized():
+            statuses = [None] * dist.get_world_size()
+            dist.all_gather_object(statuses, status)
+        failures = [item for item in statuses if item is not None]
+        if failures:
+            if all(full for full, _ in failures):
+                raise OSError(errno.ENOSPC, "Checkpoint storage exhausted: " + failures[0][1]) from error
+            if error is not None and not status[0]:
+                raise error
+            message = next(message for full, message in failures if not full)
+            raise RuntimeError("Checkpoint write failed on another rank: " + message)
 
     @staticmethod
     def _checkpoint_source(model: nn.Module) -> tuple[str | None, str | None]:
@@ -68,15 +101,14 @@ class CheckpointManager:
         from molt.utils.utils import convert_to_torch_dtype
 
         self._set_config_dtype(model.config, convert_to_torch_dtype(self.strategy.param_dtype))
-        ckpt = self._build_checkpointer(
-            output_dir, save_consolidated=True, model=model, is_peft=peft_config is not None
-        )
-        ckpt.save_model(model=model, weights_path=output_dir, tokenizer=tokenizer, peft_config=peft_config)
-        if dist.is_initialized():
-            dist.barrier()
-        self._promote_hf_export(output_dir)
-        if dist.is_initialized():
-            dist.barrier()
+        with self._checkpoint_write():
+            ckpt = self._build_checkpointer(
+                output_dir, save_consolidated=True, model=model, is_peft=peft_config is not None
+            )
+        with self._checkpoint_write():
+            ckpt.save_model(model=model, weights_path=output_dir, tokenizer=tokenizer, peft_config=peft_config)
+        with self._checkpoint_write():
+            self._promote_hf_export(output_dir)
 
     @staticmethod
     def _set_config_dtype(config, dtype: torch.dtype) -> None:
@@ -306,34 +338,26 @@ class CheckpointManager:
         is_rank0 = (not dist.is_initialized()) or dist.get_rank() == 0
         is_best = tag.startswith("best")
 
-        if is_rank0:
-            os.makedirs(ckpt_path, exist_ok=True)
-
-        if dist.is_initialized():
-            dist.barrier()
-
         save_dir = os.path.join(ckpt_path, tag)
-        os.makedirs(save_dir, exist_ok=True)
-
-        ckpt = self._build_checkpointer(save_dir, save_consolidated=False, model=model)
-        ckpt.save_model(model=model, weights_path=save_dir, tokenizer=None)
+        with self._checkpoint_write():
+            os.makedirs(save_dir, exist_ok=True)
+            ckpt = self._build_checkpointer(save_dir, save_consolidated=False, model=model)
+        with self._checkpoint_write():
+            ckpt.save_model(model=model, weights_path=save_dir, tokenizer=None)
         optimizer = kwargs.get("optimizer")
         scheduler = kwargs.get("scheduler")
         if optimizer is not None:
-            ckpt.save_optimizer(optimizer=optimizer, model=model, weights_path=save_dir, scheduler=scheduler)
+            with self._checkpoint_write():
+                ckpt.save_optimizer(optimizer=optimizer, model=model, weights_path=save_dir, scheduler=scheduler)
 
-        if dist.is_initialized():
-            dist.barrier()
-
-        if is_rank0:
-            extra = {"client_state": dict(client_states or {})}
-            self._atomic_write_torch(os.path.join(save_dir, "extra_state.pt"), extra)
-            self._write_ckpt_metric(save_dir, kwargs.get("metric_value"), kwargs.get("metric_key"))
-            if not is_best:
-                self._atomic_write_text(os.path.join(ckpt_path, "latest"), tag)
-            self._prune_checkpoints(ckpt_path, tag, max_num, max_mem, is_best)
-        if dist.is_initialized():
-            dist.barrier()
+        with self._checkpoint_write():
+            if is_rank0:
+                extra = {"client_state": dict(client_states or {})}
+                self._atomic_write_torch(os.path.join(save_dir, "extra_state.pt"), extra)
+                self._write_ckpt_metric(save_dir, kwargs.get("metric_value"), kwargs.get("metric_key"))
+                if not is_best:
+                    self._atomic_write_text(os.path.join(ckpt_path, "latest"), tag)
+                self._prune_checkpoints(ckpt_path, tag, max_num, max_mem, is_best)
 
     @staticmethod
     def _reapply_cli_optimizer_hyperparams(optimizer, scheduler, flags) -> None:
