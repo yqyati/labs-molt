@@ -103,6 +103,7 @@ class ScienceLegacyReactAgent(ChatAgent):
         agent = MultiTurnReactAgent(llm=llm_cfg, function_list=requested_tools)
         agent._get_api_base = lambda: ctx.base_url
         agent._get_api_key = lambda: ctx.api_key
+        agent._molt_append_finalization = True
         task = {
             "item": {
                 "id": os.environ.get("SCIENCE_ITEM_ID", "molt-science"),

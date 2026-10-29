@@ -253,22 +253,21 @@ def _messages_to_chat(state: ChatServerState, messages: list) -> tuple[list, lis
     Split the literal placeholder into structured content for models whose image token isn't
     ``<image>`` (Qwen-VL), so the template renders it — mirrors the RL dataset's rendering."""
     compaction = os.environ.get("AGENT_CONTEXT_COMPACTION", "0").lower() in {"1", "true", "yes"}
-    preserve_tool_protocol = compaction or os.environ.get("AGENT_OBSERVATION_MASKING", "0").lower() in {"1", "true", "yes"}
     chat, pil_images = [], []
     for m in messages:
         text, imgs = _content_to_text_and_images(m.get("content"))
         row = {"role": m.get("role"), "content": text}
-        # Rewritten histories need the actual call/response protocol, including in non-masking mode.
-        if preserve_tool_protocol:
-            for key in ("tool_calls", "reasoning_content", "reasoning", "tool_call_id", "name"):
-                if m.get(key) is not None:
-                    row[key] = m[key]
-            if row.get("tool_calls"):
-                row["tool_calls"] = deepcopy(row["tool_calls"])
-                for call in row["tool_calls"]:
-                    function = call.get("function", call)
-                    if isinstance(function.get("arguments"), str):
-                        function["arguments"] = json.loads(function["arguments"])
+        # Finalization can re-render history even without compaction or masking.
+        # Keep the assistant's separate reasoning and calls alongside tool results.
+        for key in ("tool_calls", "reasoning_content", "reasoning", "tool_call_id", "name"):
+            if m.get(key) is not None:
+                row[key] = m[key]
+        if row.get("tool_calls"):
+            row["tool_calls"] = deepcopy(row["tool_calls"])
+            for call in row["tool_calls"]:
+                function = call.get("function", call)
+                if isinstance(function.get("arguments"), str):
+                    function["arguments"] = json.loads(function["arguments"])
         if compaction and row["role"] == "assistant":
             # Raw completions carry framing that the template adds again during replay.
             row["content"] = re.sub(r"(?:\s*<\|(?:im_end|endoftext)\|>)+\s*$", "", text).strip()
@@ -303,15 +302,44 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     # (compaction)? A normal turn only appends (assistant + new user/tool) onto the SAME prefix, so
     # its messages extend last_messages; a compaction changes that prefix. Also false on turn 1.
     extends = bool(session.trajectories) and messages[: len(session.last_messages)] == session.last_messages
+    append_finalization = (
+        body.get("molt_append_finalization") is True
+        and extends
+        and len(messages) >= len(session.last_messages) + 2
+        and messages[len(session.last_messages)].get("role") == "assistant"
+        and all(m.get("role") in {"user", "tool"} for m in messages[len(session.last_messages) + 1:])
+        and messages[-1].get("role") == "user"
+        and not body.get("tools")
+    )
     chat, pil_images = _messages_to_chat(state, messages)
     # Text-only turns may quote media markers, but cannot supply their visual features.
     image_token = getattr(state.processor, "image_token", None) if not pil_images else None
     if image_token:
         sp.bad_words = list(dict.fromkeys([*(getattr(sp, "bad_words", None) or []), image_token]))
-    full = state.processor.apply_chat_template(chat, tokenize=False, add_generation_prompt=True, **kwargs)
+    if append_finalization:
+        # A new user turn can make Qwen re-render earlier reasoning. Finalization
+        # instead keeps the actual token history and templates only the new turn.
+        # Include pending tool results if the soft limit was reached after tool execution.
+        # An empty user anchor lets the template frame tool responses without replaying history.
+        anchor = [{"role": "user", "content": ""}]
+        prefix = state.processor.apply_chat_template(anchor, tokenize=False, add_generation_prompt=False)
+        full = state.processor.apply_chat_template(
+            anchor + chat[len(session.last_messages) + 1:], tokenize=False, add_generation_prompt=True
+        )
+        if not full.startswith(prefix):
+            raise HTTPException(status_code=400, detail="Template cannot append a finalization suffix")
+        full = full[len(prefix):]
+        tokenizer = getattr(state.processor, "tokenizer", state.processor)
+        end_token = getattr(tokenizer, "eos_token", None)
+        if not end_token:
+            raise HTTPException(status_code=400, detail="Append finalization requires a tokenizer EOS token")
+        closing = "" if session.last_response[0].rstrip().endswith(end_token) else end_token
+        full = closing + "\n" + full
+    else:
+        full = state.processor.apply_chat_template(chat, tokenize=False, add_generation_prompt=True, **kwargs)
     if image_token:
         full = full.replace(image_token, image_token.replace("<", "< "))
-    if extends:
+    if extends and not append_finalization:
         prefix = state.processor.apply_chat_template(chat[:-1], tokenize=False, add_generation_prompt=False, **kwargs)
         if image_token:
             prefix = prefix.replace(image_token, image_token.replace("<", "< "))
@@ -355,8 +383,9 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
         # renders land in the shared prefix and cancel (verified above), so the suffix is the new
         # user/tool turn + generation prompt (committed as masked feedback -> token-exact segment).
         traj = session.trajectories[-1]
-        delta_text = full[len(prefix) :]
-        new_pil = _content_to_text_and_images(messages[-1].get("content"))[1]  # images added THIS turn
+        delta_text = full if append_finalization else full[len(prefix) :]
+        new_messages = messages[len(session.last_messages) + 1:] if append_finalization else messages[-1:]
+        new_pil = [image for m in new_messages for image in _content_to_text_and_images(m.get("content"))[1]]
         delta_ids = await loop.run_in_executor(
             _TOKENIZE_EXECUTOR, _tokenize_feedback, state.processor, delta_text, new_pil, traj, state.max_length
         )
