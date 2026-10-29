@@ -2,6 +2,7 @@
 # Keep the Vendor 8x8 recipe, but finalize at 56k without context compaction.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export GROUP_LENGTH_PENALTY_ENABLE=0
 export AGENT_CONTEXT_COMPACTION=0
 export AGENT_EVAL_FORCE_FINALIZE=1
 export AGENT_CONTEXT_COMPACT_THRESHOLD_TOKENS=57344

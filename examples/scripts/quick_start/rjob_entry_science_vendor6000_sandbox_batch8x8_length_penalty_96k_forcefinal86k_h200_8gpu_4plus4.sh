@@ -3,6 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export GROUP_LENGTH_PENALTY_ENABLE=0
 export MAX_LEN=98304
 export MAX_NEW_TOKENS=98304
 # CP=4 distributes the 96k sequence across four policy GPUs.
