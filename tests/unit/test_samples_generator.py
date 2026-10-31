@@ -73,6 +73,78 @@ def _sample(group_id):
     return SimpleNamespace(group_ids=[group_id], total_length=None)
 
 
+@pytest.mark.parametrize("invalid_judge", [False, True])
+def test_training_records_question_scores_before_filtering_without_counting_segments_twice(
+    monkeypatch, tmp_path, invalid_judge
+):
+    from molt.trainer.algorithm.experience import Experience
+
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        ckpt=SimpleNamespace(path=str(tmp_path)),
+        rollout=SimpleNamespace(n_samples_per_prompt=2),
+        algo=SimpleNamespace(dynamic_filtering_range=[0.1, 0.9]),
+    )
+    generator.collection_step = 7
+    samples = []
+    for rollout_id, truncated in [("r0", False), ("r0", True), ("r1", False)]:
+        invalid = invalid_judge and rollout_id == "r1"
+        samples.append(Experience(
+            prompts=["question"], labels=[{"id": "q0", "subject": "physics"}],
+            group_ids=["g0"], rollout_ids=[rollout_id],
+            rewards=torch.tensor([-1.0 if invalid else 1.0]),
+            scores=torch.tensor([-1.0 if invalid else 1.0]),
+            truncated=torch.tensor([truncated]),
+            info={"science_judge_valid": torch.tensor([0.0 if invalid else 1.0])},
+        ))
+    monkeypatch.setattr(samples_generator.ray, "get", lambda _: [(s, None) for s in samples])
+    drops = defaultdict(int)
+    assert generator._filter_group("finished", True, drops) == []
+    records = [json.loads(line) for line in (tmp_path / "question_scores.jsonl").read_text().splitlines()]
+    assert len(records) == 1
+    row = records[0]
+    assert row["question_id"] == "q0" and row["collection_step"] == 7
+    assert row["attempts"] == 2 and row["expected_attempts"] == 2
+    assert row["correct"] == (None if invalid_judge else 2)
+    assert row["accuracy"] == (None if invalid_judge else 1.0)
+    assert row["rollouts"][0]["truncated"] is True
+    assert drops["invalid_reward" if invalid_judge else "dynamic_filter"] == 3
+
+
+def test_records_each_scored_question_including_uniform_and_invalid_groups(monkeypatch, tmp_path):
+    from molt.trainer.algorithm.experience import Experience
+
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        ckpt=SimpleNamespace(path=str(tmp_path)),
+        rollout=SimpleNamespace(n_samples_per_prompt=8),
+        algo=SimpleNamespace(dynamic_filtering_range=[0.1, 0.9]),
+    )
+    groups = {"all_wrong": [0] * 8, "mixed": [1] * 3 + [0] * 5,
+              "all_correct": [1] * 8, "judge_error": [-1] * 8}
+    outputs = {
+        qid: [(Experience(prompts=[qid], labels=[{"id": qid, "subject": "physics"}],
+                          group_ids=[qid], rollout_ids=[f"{qid}-{i}"],
+                          rewards=torch.tensor([score]), scores=torch.tensor([score]),
+                          truncated=torch.tensor([False]), info={"science_judge_valid": float(score >= 0)}), None)
+              for i, score in enumerate(scores)]
+        for qid, scores in groups.items()
+    }
+    monkeypatch.setattr(samples_generator.ray, "get", lambda ref: outputs[ref])
+    for step, qid in enumerate(groups):
+        generator.collection_step = step
+        generator._filter_group(qid, True, defaultdict(int))
+    records = [json.loads(line) for line in (tmp_path / "question_scores.jsonl").read_text().splitlines()]
+    assert len(records) == len(groups)
+    assert {r["question_id"] for r in records} == set(groups)
+    for qid, correct in [("all_wrong", 0), ("mixed", 3), ("all_correct", 8)]:
+        row = next(r for r in records if r["question_id"] == qid)
+        assert (row["correct"], row["attempts"], row["accuracy"]) == (correct, 8, correct / 8)
+        assert [r["score"] for r in row["rollouts"]] == groups[qid]
+    failed = next(r for r in records if r["question_id"] == "judge_error")
+    assert failed["correct"] is failed["accuracy"] is None
+
+
 def _prompt_loader(num_prompts):
     """A dataloader yielding one prompt per item, as (index, prompts, labels, images, tools)."""
     return [(i, [f"p{i}"], [f"l{i}"], [None], [None]) for i in range(num_prompts)]

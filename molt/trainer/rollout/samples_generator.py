@@ -17,6 +17,7 @@
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
 import copy
+import hashlib
 import json
 import os
 from collections import defaultdict
@@ -451,6 +452,48 @@ class SamplesGenerator:
         invalid_rewards = [s for s in group_samples
                            if _to_scalar((getattr(s, "info", None) or {}).get("science_judge_valid")) == 0
                            and _to_scalar(getattr(s, "rewards", None)) == -1]
+        args = getattr(self, "args", None)
+        record_dir = getattr(getattr(args, "ckpt", None), "path", None)
+        if group_samples and record_dir and not is_eval:
+            # Persist terminal scores before filtering or reward shaping. Compacted
+            # segments share a rollout id and must not count as extra attempts.
+            rollouts = {}
+            for sample in group_samples:
+                rid = sample.rollout_ids[0] if sample.rollout_ids else str(id(sample))
+                row = rollouts.setdefault(rid, {
+                    "rollout_id": rid, "score": _to_scalar(sample.scores),
+                    "reward": _to_scalar(sample.rewards), "truncated": False,
+                    "judge_valid": _to_scalar(sample.info.get("science_judge_valid")),
+                    "prediction_empty": _to_scalar(sample.info.get("science_prediction_empty")),
+                })
+                row["truncated"] |= bool(_to_scalar(sample.truncated))
+            first = group_samples[0]
+            label = first.labels[0] if first.labels else {}
+            if isinstance(label, str):
+                try:
+                    label = json.loads(label)
+                except ValueError:
+                    label = {}
+            label = label if isinstance(label, dict) else {}
+            prompt = first.prompts[0] if first.prompts else ""
+            question_id = label.get("id") or label.get("question_id") or hashlib.sha256(prompt.encode()).hexdigest()
+            expected = generate_kwargs.get("n_samples_per_prompt", self.args.rollout.n_samples_per_prompt)
+            scores = [r["score"] for r in rollouts.values()]
+            binary = len(scores) == expected and all(s in (0, 1) for s in scores) and not invalid_rewards
+            correct = sum(s == 1 for s in scores) if binary else None
+            record = {
+                "question_id": question_id, "prompt": prompt,
+                "group_id": first.group_ids[0] if first.group_ids else None,
+                "source": label.get("source"), "subject": label.get("subject"),
+                "collection_step": getattr(self, "collection_step", None),
+                "stage": "before_group_filter", "expected_attempts": expected,
+                "attempts": len(scores), "correct": correct,
+                "accuracy": correct / expected if binary else None,
+                "rollouts": list(rollouts.values()),
+            }
+            os.makedirs(record_dir, exist_ok=True)
+            with open(os.path.join(record_dir, "question_scores.jsonl"), "a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, ensure_ascii=False) + "\n")
         if invalid_rewards:
             if not is_eval:
                 drop_counts["invalid_reward"] += len(group_samples)

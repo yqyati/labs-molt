@@ -776,6 +776,7 @@ class GenerateSamplesActor:
                         ray.get(self.vllm_lock.acquire.remote())
                     try:
                         t0 = time.time()
+                        self.samples_generator.collection_step = global_step
                         rollout_samples, rollout_metrics, prompts_consumed, is_exhausted = (
                             self.samples_generator.generate_samples(**self.generate_kwargs)
                         )
