@@ -928,6 +928,11 @@ if __name__ == "__main__":
     # Eval
     parser.add_argument("--eval.dataset", type=str, default=None, help="Path to the evaluation dataset")
     parser.add_argument(
+        "--eval.trace_only", action=argparse.BooleanOptionalAction, default=True,
+        help="Keep durable eval JSONL traces and scores without PT dumps (default); "
+        "--no-eval.trace_only opts into tensor dumps for debugging.",
+    )
+    parser.add_argument(
         "--eval.batch_size",
         type=int,
         default=None,

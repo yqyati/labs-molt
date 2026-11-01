@@ -203,13 +203,15 @@ class SamplesGenerator:
                 for ref in ready_refs:
                     finished = self._filter_group(ref, False, drop_counts, is_eval=True, **generate_kwargs)
                     if trace_file is not None and finished:
-                        # Persist local tensors, not Ray refs that die with their runner.
-                        local = [copy.copy(sample).reload() for sample in finished]
-                        dump_path = os.path.join(dump_dir, f"eval_rollout_{len(all_experiences):06d}.pt")
-                        with open(dump_path, "wb") as tensor_file:
-                            torch.save(local, tensor_file)
-                            tensor_file.flush()
-                            os.fsync(tensor_file.fileno())
+                        dump_path = trace_file.name
+                        if not getattr(self.args.eval, "trace_only", True):
+                            # Persist local tensors, not Ray refs that die with their runner.
+                            local = [copy.copy(sample).reload() for sample in finished]
+                            dump_path = os.path.join(dump_dir, f"eval_rollout_{len(all_experiences):06d}.pt")
+                            with open(dump_path, "wb") as tensor_file:
+                                torch.save(local, tensor_file)
+                                tensor_file.flush()
+                                os.fsync(tensor_file.fileno())
                         for sample in finished:
                             info = {key: _to_scalar(value) if isinstance(value, torch.Tensor) and value.numel() == 1 else value
                                     for key, value in (sample.info or {}).items()}

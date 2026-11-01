@@ -828,7 +828,7 @@ class GenerateSamplesActor:
             if override is not None:
                 eval_kwargs[key] = override
         samples_list = self.samples_generator.generate_eval_samples(**eval_kwargs)
-        if self.args.train.rollout_dump_dir:
+        if self.args.train.rollout_dump_dir and not getattr(self.args.eval, "trace_only", True):
             os.makedirs(self.args.train.rollout_dump_dir, exist_ok=True)
             eval_dump_path = os.path.join(self.args.train.rollout_dump_dir, "eval_rollouts.pt")
             torch.save(samples_list, eval_dump_path)

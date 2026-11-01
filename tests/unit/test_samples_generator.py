@@ -260,15 +260,18 @@ def test_generate_eval_samples_defaults_to_rollout_batch_size(monkeypatch):
     assert dispatch_sizes == [2, 1, 1, 1]
 
 
-def test_eval_persists_completed_task_before_next_result_fails(monkeypatch, tmp_path):
+@pytest.mark.parametrize("trace_only", [False, True, None])
+def test_eval_persists_completed_task_before_next_result_fails(monkeypatch, tmp_path, trace_only):
     from molt.trainer.algorithm.experience import Experience
 
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=2, n_samples_per_prompt=1),
-        eval=SimpleNamespace(batch_size=2),
+        eval=SimpleNamespace(batch_size=2, trace_only=trace_only),
         train=SimpleNamespace(rollout_dump_dir=str(tmp_path)),
     )
+    if trace_only is None:
+        del generator.args.eval.trace_only
     _wire_eval_generator(generator, monkeypatch, num_prompts=2)
     sample = Experience(
         prompts=["p0"], labels=[{"id": "q0"}], rewards=torch.tensor([1.0]), scores=torch.tensor([1.0]),
@@ -280,12 +283,16 @@ def test_eval_persists_completed_task_before_next_result_fails(monkeypatch, tmp_
 
     def get_result(handle):
         if handle == "runner-tensors":
+            assert trace_only is False, "Text-only evaluation must not fetch tensors from the runner"
             return {"sequences": torch.tensor([[1, 2, 3]])}
         if handle.group_id == "p0":
             return [(sample, None)]
-        saved = torch.load(tmp_path / "eval_rollout_000000.pt", weights_only=False)
-        assert saved[0].heavy_ref is None
-        assert saved[0].sequences.tolist() == [[1, 2, 3]]
+        if trace_only is not False:
+            assert not list(tmp_path.glob("*.pt"))
+        else:
+            saved = torch.load(tmp_path / "eval_rollout_000000.pt", weights_only=False)
+            assert saved[0].heavy_ref is None
+            assert saved[0].sequences.tolist() == [[1, 2, 3]]
         rows = [json.loads(line) for line in (tmp_path / "eval_trace.jsonl").read_text().splitlines()]
         assert rows[0]["reward"] == 1.0
         assert rows[0]["info"]["science_judge_valid"] == 1.0
