@@ -84,7 +84,9 @@ def _collect_prompt_batch(dataloader_iter, num_prompts: int):
     return prompts, labels, images, tools, exhausted
 
 
-@ray.remote(num_cpus=0)
+# Disable retries so Ray releases consumed groups' heavy tensor references instead of retaining them for replay.
+# https://github.com/NVIDIA-NeMo/labs-molt/pull/215
+@ray.remote(num_cpus=0, max_retries=0)
 def _gather_group(*parts):
     """Re-join one prompt group's per-rollout results (runs once all of them finished)."""
     return [item for part in parts for item in part]
