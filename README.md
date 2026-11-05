@@ -195,6 +195,7 @@ Common RL switches:
 | Filter by agent scores | `--algo.dynamic_filtering_enable --algo.dynamic_filtering_range 0.0 1.0` |
 | Correct async rollout logprobs | `--algo.advantage.is_correction_level geo` (seq-mask-tis; token-level adds `--algo.advantage.is_correction_mode clip/trunc/mask`) |
 | FlashREINFORCE (critic-free, single-rollout) | `--train.force_on_policy --algo.advantage.estimator flash_reinforce --algo.advantage.is_correction_level seq --algo.advantage.is_correction_gating binary_kl --algo.advantage.is_correction_threshold 5e-3 --actor.loss_agg_mode seq-mean-token-mean` — see [the quick start](examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh) |
+| Score centering (off-policy REINFORCE without IS) | `--algo.advantage.score_centering_top_k 32`: records the rollout sampler's top-k log-probs per token and subtracts its expected score from the policy loss ([paper](https://arxiv.org/abs/2609.20807)). Use it **instead of** an IS gate (`is_correction_level off`), or compose it with a token-level weight only: `--algo.advantage.is_correction_level token --algo.advantage.is_correction_mode trunc` (the paper's TIS variant) or `mode mask` (IcePop-style MIS). It cannot be stacked on the sequence-level gate the FlashREINFORCE recipe uses (`is_correction_level seq/geo`): a sequence gate has no per-candidate form in this implementation |
 | Freeze MoE routing (stabilize MoE RL) | `--actor.freeze_moe_router` |
 | On-policy distillation | `--algo.advantage.estimator on_policy_distill --ref.model_name_or_path /path/to/teacher` |
 | Independent eval sampling | `--eval.temperature`, `--eval.top_p`, `--eval.max_new_tokens`, `--eval.n_samples_per_prompt` (unset ones fall back to rollout) |
@@ -610,10 +611,34 @@ The named schemes and their prior art:
 | `level token mode clip` | token clip | per-token weight clamp |
 | `level geo mode mask` | seq-mask-tis (recipe default) | MIS-style sequence masked importance sampling |
 | `level seq mode mask` | product-ratio reject | sequence log-ratio sum |
+| `score_centering_top_k 32` (+ optional `level token mode trunc\|mask`) | score centering (no ratio; optionally on top of TIS / IcePop) | Score Centering |
 
 References: **TIS** (truncated importance sampling of the train/infer ratio), **IcePop**
-(token-level masking of out-of-band ratios), and **MIS** (masked importance sampling, Yingru Li —
-sequence-level masked IS, which motivates the `seq`/`geo` rejection filter).
+(token-level masking of out-of-band ratios), **MIS** (masked importance sampling, Yingru Li —
+sequence-level masked IS, which motivates the `seq`/`geo` rejection filter), and
+**Score Centering** ([arXiv 2609.20807](https://arxiv.org/abs/2609.20807)).
+
+**Score centering** (`--algo.advantage.score_centering_top_k 32`, default `0` / disabled)
+
+Based on [Molt #182](https://github.com/NVIDIA-NeMo/labs-molt/pull/182) and
+[the paper](https://arxiv.org/abs/2609.20807). The sampler returns top-k token IDs and
+log-probabilities; the trainer scores those IDs in the same chunked log-prob pass
+and subtracts an approximation to the sampler's expected gradient score. This is
+separate from GRPO reward centering and advantage whitening. Finite top-k uses a
+rescaled-policy tail approximation; it does not remove all off-policy bias.
+
+Enable with `--algo.advantage.score_centering_top_k 32 --rollout.top_p 1.0
+--train.max_epochs 1 --fsdp.tp_size 1 --algo.advantage.is_correction_level off`.
+It also supports token-level IS (`trunc`, `clip`, or `mask`) with ratio gating,
+but rejects sequence gates. Every generation turn, including forced finalization,
+must use positive temperature, `top_p=1`, `top_k=-1`, `min_p=0`, and token-ID stops
+rather than stop strings. Unsupported settings fail instead of being overridden.
+
+Top-k data adds rollout transport, CPU storage and GPU tensors proportional to
+`tokens × k`; it does not request another backbone forward or a full-vocabulary
+probability copy. Evaluation disables collection. Training reports
+`sc_sampler_head_mass` and `sc_policy_head_mass` to track tail coverage. GPU peak
+memory and throughput still need measurement on the target training stack.
 
 </details>
 

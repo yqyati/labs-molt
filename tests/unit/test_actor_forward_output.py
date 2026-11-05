@@ -22,10 +22,15 @@ the writes are purely additive, and ``logits`` is the only field Actor.forward
 intentionally replaces (with its gathered / chunk-sliced version).
 """
 
+from types import SimpleNamespace
+
+import pytest
 import torch
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from molt.models.base import _AttrDict, _normalize_output
+from molt.models.actor import Actor
+from molt.models.base import BaseModel
 
 
 def test_hf_causal_lm_output_has_no_logprob_fields():
@@ -67,3 +72,34 @@ def test_nemo_custom_raw_tensor_output_wraps_then_adds():
 
     out["log_probs"] = logits[:, :-1, 0]
     assert out["logits"] is logits  # logits unchanged by the new key
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_score_centering_head_matches_dense_log_softmax_and_gradients(packed):
+    torch.manual_seed(17)
+    logits = torch.randn(2, 4, 9, dtype=torch.bfloat16, requires_grad=True)
+    sequences = torch.tensor([[1, 2, 3, 0], [4, 5, 6, 7]])
+    mask = torch.tensor([[True, True, False], [True, True, True]])
+    ids = torch.tensor([[[3, 8], [4, 2], [0, 0]], [[2, 6], [1, 5], [3, 7]]])
+    indices = torch.tensor([0, 1, 2, 4, 5, 6, 7]) if packed else None
+    labels = sequences.roll(-1, dims=1)
+    model_logits = logits
+    if packed:
+        model_logits = logits.reshape(-1, 9)[indices].unsqueeze(0)
+        labels = labels.reshape(-1)[indices].unsqueeze(0)
+    calls = []
+
+    def backbone(*args, **kwargs):
+        calls.append(1)
+        return _AttrDict(logits=model_logits), labels, False, indices, 2, 4
+
+    actor = SimpleNamespace(temperature=0.7, packing_samples=packed, _forward_backbone=backbone)
+    actor._restore_full_sequence = lambda t, **kwargs: BaseModel._restore_full_sequence(actor, t, **kwargs)
+    output = Actor.forward(actor, sequences, mask, top_ids=ids)
+    expected = torch.log_softmax(logits.float() / 0.7, dim=-1)[:, :-1].gather(-1, ids)
+    valid = mask.unsqueeze(-1).expand_as(expected)
+    torch.testing.assert_close(output["action_top_log_probs"][valid], expected[valid], atol=1e-6, rtol=1e-5)
+    actual_grad = torch.autograd.grad(output["action_top_log_probs"][valid].sum(), logits, retain_graph=True)[0]
+    expected_grad = torch.autograd.grad(expected[valid].sum(), logits)[0]
+    torch.testing.assert_close(actual_grad, expected_grad, atol=0.02, rtol=0.02)
+    assert len(calls) == 1

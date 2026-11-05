@@ -21,6 +21,7 @@ from typing import Callable, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from .score_centering import score_centering_correction
 from .utils import masked_mean
 
 
@@ -271,6 +272,7 @@ class PolicyLoss(nn.Module):
         loss_agg_mode: str = "token-mean",
         loss_mode: str = "ppo",
         is_correction_gating: str = "ratio",
+        score_centering: bool = False,
     ) -> None:
         super().__init__()
         self.clip_eps_low = clip_eps_low
@@ -309,6 +311,19 @@ class PolicyLoss(nn.Module):
             )
 
         self.is_correction_gating = is_correction_gating
+        # Score centering (https://arxiv.org/abs/2609.20807) adds the sampler-centering term to the
+        # surrogate; with one update per batch the ratio is 1, so the surrogate's gradient is the
+        # REINFORCE score the paper centers. It composes with a per-token importance weight only
+        # (Eq. 14): sequence gates (seq/geo) and divergence gates (binary_kl/tv) have no head form.
+        self.score_centering = score_centering
+        if score_centering and (
+            self.is_correction_level not in {"off", "token"} or self.is_correction_gating != "ratio"
+        ):
+            raise ValueError(
+                "score_centering composes with the per-token ratio weight only (is_correction_level off|token, "
+                "is_correction_gating ratio). Sequence and divergence gates have no per-candidate form here; "
+                "use score centering instead of those gates."
+            )
 
         if self.is_correction_level not in {"off", "token", "seq", "geo"}:
             raise ValueError(f"is_correction_level must be off/token/seq/geo, got {self.is_correction_level}")
@@ -341,7 +356,10 @@ class PolicyLoss(nn.Module):
         dp_size: int = 1,
         batch_num_tokens: Optional[torch.Tensor] = None,
         global_batch_size: Optional[torch.Tensor] = None,
+        top_log_probs: Optional[torch.Tensor] = None,
+        rollout_top_log_probs: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Top-k log-probs use step-major shape ``[B, T-1, k]`` for score centering."""
         log_ratio_limit = 30.0
         policy_log_ratio = torch.nan_to_num(
             log_probs.float() - old_log_probs.float(),
@@ -438,6 +456,21 @@ class PolicyLoss(nn.Module):
                 neginf=-log_ratio_limit,
             )
             vllm_kl = masked_mean(vllm_logprob_diff, action_mask, dim=None)
+
+        if self.score_centering:
+            if top_log_probs is None or rollout_top_log_probs is None:
+                raise ValueError(
+                    "score_centering needs the sampler's top-k log-probs (--algo.advantage.score_centering_top_k)"
+                )
+            # The head carries the same per-token weight f as the sampled token above (1 when the IS
+            # correction is off); that is what keeps E_q[grad] = 0 (paper Eq. 14).
+            mode, (low, high) = "none", (None, None)
+            if self.is_correction_level != "off":
+                mode, (low, high) = self.is_correction_mode, self.is_correction_threshold
+            correction = score_centering_correction(
+                top_log_probs, rollout_top_log_probs, mode=mode, low=low, high=high
+            )
+            loss = loss + advantages * correction
 
         # Reported loss is a plain per-token mean, decoupled from the gradient
         # normalization below. With the slime "global token-mean" denominator

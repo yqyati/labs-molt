@@ -96,7 +96,9 @@ def train(args):
             args.vllm.enforce_eager,
             max_len,
             args.vllm.gpu_memory_utilization,
-            "processed_logprobs" if args.algo.advantage.is_correction_level != "off" else None,
+            "processed_logprobs"
+            if args.algo.advantage.is_correction_level != "off" or args.algo.advantage.score_centering_top_k
+            else None,
             max_images_per_prompt=getattr(args.data, "max_images_per_prompt", 0),
             mm_encoder_attn_backend=args.vllm.mm_encoder_attn_backend,
             gdn_prefill_backend=args.vllm.gdn_prefill_backend,
@@ -118,6 +120,7 @@ def train(args):
             data_parallel_size=getattr(args.vllm, "data_parallel_size", 1),
             enable_auto_tool_choice=args.vllm.enable_auto_tool_choice,
             tool_call_parser=args.vllm.tool_call_parser,
+            max_logprobs=args.algo.advantage.score_centering_top_k,
         )
 
     # Rollout gateway: serve each engine's OpenAI API + the real vllm-router in front of them.
@@ -143,6 +146,8 @@ def train(args):
         "max_new_tokens": args.rollout.max_new_tokens,
         "temperature": args.rollout.temperature,
         "top_p": args.rollout.top_p,
+        # Score centering trains on the sampler's top-k per token; 0 = sampled-token log-prob only.
+        "top_logprobs": args.algo.advantage.score_centering_top_k,
     }
 
     # Eval-only: score --eval.dataset once and exit, with NO training. vLLM already holds the HF
@@ -517,6 +522,14 @@ if __name__ == "__main__":
         choices=["mask", "clip", "trunc"],
         help="Bound treatment (token level only for clip/trunc): mask (drop out-of-band units, zero "
         "gradient), clip (clamp the weight into [low, high]), trunc (clamp only the upper tail).",
+    )
+    parser.add_argument(
+        "--algo.advantage.score_centering_top_k",
+        type=int,
+        default=0,
+        help="Sampler score centering (https://arxiv.org/abs/2609.20807): collect top-k log-probs per generated "
+        "token and add a gradient-centering term. 0 = disabled; start with 32. Requires max_epochs 1, "
+        "top_p 1.0, positive temperature and fsdp tp_size 1; supports IS level off/token with ratio gating.",
     )
     parser.add_argument(
         "--algo.advantage.is_correction_threshold",
@@ -1096,7 +1109,29 @@ if __name__ == "__main__":
             "n_samples_per_prompt must be greater than 1 when using dynamic filtering"
         )
 
-    if args.algo.advantage.is_correction_level == "off":
+    if args.algo.advantage.score_centering_top_k < 0 or args.algo.advantage.score_centering_top_k == 1:
+        raise ValueError("score_centering_top_k must be 0 (disabled) or at least 2")
+    if args.algo.advantage.score_centering_top_k:
+        if (
+            args.algo.advantage.is_correction_level not in {"off", "token"}
+            or args.algo.advantage.is_correction_gating != "ratio"
+        ):
+            raise ValueError("score centering supports only IS level off/token with ratio gating")
+        if args.train.max_epochs != 1:
+            # The centered term is the REINFORCE score; a second epoch over the same batch moves the
+            # policy ratio off 1 and the clipped surrogate no longer is that score.
+            raise ValueError(
+                "--algo.advantage.score_centering_top_k needs one update per batch (--train.max_epochs 1)"
+            )
+        if args.rollout.top_p != 1.0 or args.rollout.temperature <= 0:
+            # The head plus the reconstructed tail must be the distribution the engine actually sampled
+            # from; a top-p nucleus truncates the tail and greedy decoding has no distribution at all.
+            raise ValueError("score centering needs --rollout.top_p 1.0 and --rollout.temperature > 0")
+        if args.fsdp.tp_size > 1:
+            raise ValueError("score centering requires --fsdp.tp_size 1 (the head is not vocab-parallel yet)")
+
+    # Score centering provides an alternative correction for sampler/learner score drift.
+    if args.algo.advantage.is_correction_level == "off" and not args.algo.advantage.score_centering_top_k:
         # The HTTP router path can't observe a mid-request weight swap, so off_policy_len is always 0
         # (no slime-style masking of stale-weight tokens). Async rollout (crosses broadcasts between
         # requests) and partial rollout (preempts mid-request at every weight sync) both then feed
