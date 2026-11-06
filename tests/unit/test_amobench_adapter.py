@@ -17,6 +17,26 @@ spec.loader.exec_module(extraction)
 
 
 class AmoAdapterTests(unittest.TestCase):
+    def test_imo_prompt_and_cmt_parameters(self):
+        for benchmark in ['imo_answerbench', 'cmt_benchmark']:
+            with self.subTest(benchmark=benchmark), tempfile.TemporaryDirectory() as tmp:
+                source, output = Path(tmp) / 'source.jsonl', Path(tmp) / 'output.jsonl'
+                original = dict(id='q1', question='Compute energy.', answer=['U/2'],
+                                prompt=[dict(role='user', content='Official instructions: Compute energy.')],
+                                parameters='U', functions='f(x)', image_question=[])
+                source.write_text(json.dumps(original) + '\n')
+                subprocess.run([sys.executable, str(REPO / 'examples/python/utils/prepare_amobench.py'),
+                                '--source', str(source), '--output', str(output), '--expected-rows', '1',
+                                '--benchmark', benchmark], check=True, capture_output=True)
+                row = json.loads(output.read_text())
+                self.assertEqual(row['datasource'], benchmark)
+                self.assertEqual(json.loads(row['science_item']['answer']), ['U/2'])
+                if benchmark == 'imo_answerbench':
+                    self.assertEqual(row['prompt'], original['prompt'])
+                else:
+                    self.assertIn('Parameters (if any):\nU', row['prompt'][0]['content'])
+                    self.assertIn('Functions (if any):\nf(x)', row['prompt'][0]['content'])
+
     def test_preserves_all_references_and_question(self):
         with tempfile.TemporaryDirectory() as tmp:
             source, output = Path(tmp) / 'source.jsonl', Path(tmp) / 'output.jsonl'

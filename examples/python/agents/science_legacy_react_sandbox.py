@@ -129,10 +129,13 @@ class ScienceLegacyReactAgent(ChatAgent):
             finally:
                 raise asyncio.CancelledError
         raw_prediction = _text(result.get("prediction") if isinstance(result, dict) else result)
-        amo_protocol = os.environ.get("SCIENCE_AGENT_EVAL_BENCHMARK", "") == "amobench"
+        amo_protocol = os.environ.get("SCIENCE_AGENT_EVAL_BENCHMARK", "") in {"amobench", "imo_answerbench"}
         fso_protocol = os.environ.get("SCIENCE_AGENT_EVAL_BENCHMARK", "") == "fso"
         next_protocol = os.environ.get("SCIENCE_AGENT_NEXT_HLE_EVAL_PROTOCOL", "0").lower() in {"1", "true", "yes"}
         prediction = _extract_hle_candidate(raw_prediction) if next_protocol else raw_prediction
+        if os.environ.get("SCIENCE_AGENT_EVAL_BENCHMARK", "") == "cmt_benchmark":
+            prediction = raw_prediction.rsplit("</think>", 1)[-1].strip()
+            next_protocol = True
         if amo_protocol:
             prediction = raw_prediction.rsplit("</think>", 1)[-1].strip()
             for token in ("<|im_start|>", "<|im_end|>", "<|endoftext|>"):

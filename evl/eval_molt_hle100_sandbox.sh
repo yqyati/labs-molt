@@ -211,6 +211,7 @@ python3 -u -m molt.cli.train_rl_ray \
   --vllm.tensor_parallel_size "$TP" \
   --vllm.gpu_memory_utilization 0.8 \
   --vllm.distributed_executor_backend mp \
+  --vllm.enable_prefix_caching \
   --vllm.enable_auto_tool_choice \
   --vllm.tool_call_parser "${VLLM_TOOL_CALL_PARSER:-qwen3_coder}" \
   --train.agent_path "$MOLT_REPO/examples/python/agents/science_legacy_react_sandbox.py" \

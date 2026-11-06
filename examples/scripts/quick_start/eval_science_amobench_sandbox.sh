@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Evaluate an HF checkpoint on AMO or FSO with the shared agent and Sandbox tools.
+# Evaluate an HF checkpoint with the shared science agent and Sandbox tools.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOLT_REPO="${MOLT_PATH:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
@@ -8,6 +8,7 @@ GPFS2_ROOT="${GPFS2_ROOT:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2}"
 SCI_RESEARCH_ROOT="$GPFS2_ROOT/scientific_reasoning_and_research"
 HARNESS_ROOT="${SCIENCE_AGENT_ROOT:-$WORKSPACE_ROOT/harness/science-agent-sandbox}"
 export SCIENCE_AGENT_EVAL_BENCHMARK="${SCIENCE_AGENT_EVAL_BENCHMARK:-amobench}"
+PREPARE_ARGS=()
 case "$SCIENCE_AGENT_EVAL_BENCHMARK" in
   amobench)
     EVAL_SOURCE="${AMO_SOURCE:-$SCI_RESEARCH_ROOT/jiangyichen/p1-shared-2/eval/math/amobench.jsonl}"
@@ -19,12 +20,24 @@ case "$SCIENCE_AGENT_EVAL_BENCHMARK" in
     PREPARER=prepare_frontierscience_olympiad.py
     DEFAULT_OUTPUT="$GPFS2_ROOT/yangqingyu/eval/molt_fso_sandbox/fso-$(date +%Y%m%d-%H%M%S)"
     ;;
+  imo_answerbench|cmt_benchmark)
+    if [[ "$SCIENCE_AGENT_EVAL_BENCHMARK" == imo_answerbench ]]; then
+      EVAL_SOURCE="${IMO_SOURCE:-$SCI_RESEARCH_ROOT/jiangyichen/p1-shared-2/eval/math/imo_answerbench.jsonl}"
+      EXPECTED_ROWS=400
+    else
+      EVAL_SOURCE="${CMT_SOURCE:-$SCI_RESEARCH_ROOT/jiangyichen/p1-shared-2/eval/cmt_benchmark/cmt_benchmark.jsonl}"
+      EXPECTED_ROWS=50
+    fi
+    PREPARER=prepare_amobench.py
+    PREPARE_ARGS=(--benchmark "$SCIENCE_AGENT_EVAL_BENCHMARK" --expected-rows "$EXPECTED_ROWS")
+    DEFAULT_OUTPUT="$GPFS2_ROOT/yangqingyu/eval/molt_${SCIENCE_AGENT_EVAL_BENCHMARK}_sandbox/$(date +%Y%m%d-%H%M%S)"
+    ;;
   *) echo "Unsupported evaluation benchmark: $SCIENCE_AGENT_EVAL_BENCHMARK" >&2; exit 2 ;;
 esac
 OUTPUT_ROOT="${OUTPUT_ROOT:-$DEFAULT_OUTPUT}"
 EVAL_DATASET="$OUTPUT_ROOT/${SCIENCE_AGENT_EVAL_BENCHMARK}_molt.jsonl"
 mkdir -p "$OUTPUT_ROOT"
-python3 "$MOLT_REPO/examples/python/utils/$PREPARER" --source "$EVAL_SOURCE" --output "$EVAL_DATASET"
+python3 "$MOLT_REPO/examples/python/utils/$PREPARER" --source "$EVAL_SOURCE" --output "$EVAL_DATASET" "${PREPARE_ARGS[@]}"
 if [[ "${PREPARE_ONLY:-0}" == 1 ]]; then exit 0; fi
 MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to a consolidated HF model directory}"
 test -f "$MODEL_PATH/config.json"
@@ -91,6 +104,7 @@ python3 -u -m molt.cli.train_rl_ray \
   --vllm.tensor_parallel_size "$TP" \
   --vllm.gpu_memory_utilization 0.8 \
   --vllm.distributed_executor_backend mp \
+  --vllm.enable_prefix_caching \
   --vllm.enable_auto_tool_choice \
   --vllm.tool_call_parser "${VLLM_TOOL_CALL_PARSER:-qwen3_coder}" \
   --train.agent_path "$MOLT_REPO/examples/python/agents/science_legacy_react_sandbox.py" \
