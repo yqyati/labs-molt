@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Frozen-router GRPO; synchronous rollout avoids stale samples without IS correction.
+# Frozen-router GRPO with geometric-mean IS gating and asynchronous partial rollout.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,7 +8,7 @@ export DATASET="${DATASET:-$GPFS2_ROOT/yangqingyu/workspace/science_training_rep
 export MAX_SAMPLES=1440
 export N_SAMPLES_PER_PROMPT=8 ROLLOUT_BATCH_SIZE=8 TRAIN_BATCH_SIZE=64
 export DYNAMIC_FILTERING_ENABLE=1 GROUP_LENGTH_PENALTY_ENABLE=0
-export PARTIAL_ROLLOUT_ENABLE=0
+export PARTIAL_ROLLOUT_ENABLE=1
 export ROLLOUT_VLLM_GENERATE_BATCH_SIZE=6
 export MAX_LEN=96256 MAX_NEW_TOKENS=96256
 export TRAIN_MAX_TOKENS_PER_GPU="${TRAIN_MAX_TOKENS_PER_GPU:-25000}"
@@ -22,8 +22,10 @@ exec bash "$SCRIPT_DIR/rjob_entry_science_vendor6000_sandbox_batch8x8_length_pen
   --algo.advantage.estimator grpo --algo.advantage.no_whiten \
   --algo.dynamic_filtering_enable --algo.dynamic_filtering_range 0 1 \
   --actor.loss_agg_mode token-mean --actor.eps_clip_low_high 0.2 0.27 \
-  --algo.advantage.is_correction_level off \
+  --algo.advantage.is_correction_level geo \
+  --algo.advantage.is_correction_gating ratio \
+  --algo.advantage.is_correction_mode mask --algo.advantage.is_correction_threshold 0.5 5.0 \
   --algo.advantage.score_centering_top_k 0 \
-  --train.async_queue_size 1 --train.force_sync_mode \
+  --train.async_queue_size 2 --train.partial_rollout_enable \
   --rollout.temperature 1.0 --rollout.top_p 1.0 --train.max_epochs 1 \
   "$@"
