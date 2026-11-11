@@ -44,6 +44,7 @@ class Actor(BaseModel):
         position_ids: Optional[torch.Tensor] = None,
         cp_context_stack=None,
         return_entropy=False,
+        entropy_no_grad=False,
         routed_experts: Optional[torch.Tensor] = None,
         top_ids: Optional[torch.Tensor] = None,
         **mm_inputs,
@@ -69,26 +70,40 @@ class Actor(BaseModel):
         full_logits = None
 
         if return_entropy:
-            entropy_logits = unshard_dtensor(logits).to(torch.float32)
-            if not cp_forward:
-                full_logits = entropy_logits
-                output["logits"] = full_logits
-            # Compute entropy on the same temperature-scaled distribution as the
-            # policy log-probs below (which divide by self.temperature). Without
-            # this the entropy-regularization term operates on a different (T=1)
-            # distribution than the policy whenever rollout.temperature != 1.0.
-            # Standard practice scales logits before both log-probs *and*
-            # entropy. Divide a copy so output["logits"]/full_logits stay raw
-            # (log_probs_from_logits applies its own temperature division).
-            entropy_src = entropy_logits / self.temperature if self.temperature != 1.0 else entropy_logits
-            entropy = compute_entropy(entropy_src)
-            # entropy is seq-local even under TP+CP (unshard_dtensor only
-            # collapses the TP vocab dim), so restore the full sequence axis the
-            # same way as log_probs below.
-            entropy = self._restore_full_sequence(
-                entropy, cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
-            )
-            output["entropy"] = entropy[:, :-1]
+            # Monitoring uses detached chunks so full-vocabulary intermediates
+            # do not persist for backward or require a full-sequence fp32 copy.
+            if entropy_no_grad:
+                with torch.no_grad():
+                    local_logits = unshard_dtensor(logits.detach())
+                    flat = local_logits.reshape(-1, local_logits.shape[-1])
+                    entropy = torch.cat([
+                        compute_entropy(chunk.float() / self.temperature)
+                        for chunk in flat.split(1024)
+                    ]).reshape(local_logits.shape[:-1])
+                output["entropy"] = self._restore_full_sequence(
+                    entropy, cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
+                )[:, :-1]
+            else:
+                entropy_logits = unshard_dtensor(logits).to(torch.float32)
+                if not cp_forward:
+                    full_logits = entropy_logits
+                    output["logits"] = full_logits
+                # Compute entropy on the same temperature-scaled distribution as the
+                # policy log-probs below (which divide by self.temperature). Without
+                # this the entropy-regularization term operates on a different (T=1)
+                # distribution than the policy whenever rollout.temperature != 1.0.
+                # Standard practice scales logits before both log-probs *and*
+                # entropy. Divide a copy so output["logits"]/full_logits stay raw
+                # (log_probs_from_logits applies its own temperature division).
+                entropy_src = entropy_logits / self.temperature if self.temperature != 1.0 else entropy_logits
+                entropy = compute_entropy(entropy_src)
+                # entropy is seq-local even under TP+CP (unshard_dtensor only
+                # collapses the TP vocab dim), so restore the full sequence axis the
+                # same way as log_probs below.
+                entropy = self._restore_full_sequence(
+                    entropy, cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
+                )
+                output["entropy"] = entropy[:, :-1]
 
         # Score centering: the sampler's top-k ids ride along as extra targets of the SAME log-prob
         # pass (one log-softmax per row). They arrive step-major (B, S-1, k) in the caller's

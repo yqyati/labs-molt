@@ -33,6 +33,28 @@ from molt.models.actor import Actor
 from molt.models.base import BaseModel
 
 
+def test_entropy_monitor_matches_dense_entropy_without_changing_policy_gradients():
+    torch.manual_seed(42)
+    logits = torch.randn(1, 2050, 11, dtype=torch.bfloat16, requires_grad=True)
+    sequences = torch.randint(0, 11, (1, 2050))
+    mask = torch.ones(1, 2049, dtype=torch.bool)
+    actor = SimpleNamespace(temperature=0.7, packing_samples=False)
+    actor._forward_backbone = lambda *args, **kwargs: (
+        _AttrDict(logits=logits), sequences.roll(-1, dims=1), False, None, 1, 2050
+    )
+    actor._restore_full_sequence = lambda t, **kwargs: t
+    baseline = Actor.forward(actor, sequences, mask)
+    monitored = Actor.forward(actor, sequences, mask, return_entropy=True, entropy_no_grad=True)
+    logp = torch.log_softmax(logits.float() / 0.7, dim=-1)
+    expected = -(logp.exp() * logp).sum(-1)[:, :-1]
+    torch.testing.assert_close(monitored.entropy, expected)
+    assert not monitored.entropy.requires_grad
+    torch.testing.assert_close(monitored.action_log_probs, baseline.action_log_probs)
+    before = torch.autograd.grad(baseline.action_log_probs.sum(), logits, retain_graph=True)[0]
+    after = torch.autograd.grad(monitored.action_log_probs.sum(), logits)[0]
+    torch.testing.assert_close(before, after)
+
+
 def test_hf_causal_lm_output_has_no_logprob_fields():
     # If any of these pre-existed on the model output, Actor.forward's
     # output[...] = ... assignments would overwrite a model-produced tensor.

@@ -436,9 +436,8 @@ class PolicyTrainer:
             action_mask,
             attention_mask=attention_mask,
             cp_context_stack=cp_context_stack,
-            # entropy_coef=0.0 disables the entropy term in loss. Skip the
-            # entropy forward path entirely in that case.
-            return_entropy=bool(self.args.actor.entropy_coef),
+            return_entropy=bool(self.args.actor.entropy_coef) or getattr(self.args.actor, "log_entropy", False),
+            entropy_no_grad=not bool(self.args.actor.entropy_coef),
             # R3: replay the rollout's expert selection (None when routing replay off).
             routed_experts=experience.routed_experts,
             # Score centering: also score the sampler's top-k ids in the same pass (None otherwise).
@@ -551,14 +550,12 @@ class PolicyTrainer:
         if self.aux_loss:
             aux_loss, _ = split_moe_aux_loss(model_output, self.aux_loss)
             total_loss += aux_loss * self.args.actor.aux_loss_coef / num_microbatches
-        # entropy loss — only computed when entropy is actually wanted; matches
-        # the return_entropy gating on the forward call above. With coef=0/None,
-        # model_output.entropy was never materialized. entropy_loss is the plain
-        # per-token mean reported in metrics; the gradient term uses the same
-        # global token-mean as the policy loss.
-        if bool(self.args.actor.entropy_coef):
+        # Logging alone never adds an entropy term to the optimization objective.
+        entropy_loss = None
+        if bool(self.args.actor.entropy_coef) or getattr(self.args.actor, "log_entropy", False):
             entropy = model_output.entropy[:, -experience.action_mask.shape[1] :]
             entropy_loss = masked_mean(entropy, action_mask)
+        if bool(self.args.actor.entropy_coef):
             entropy_term = agg_loss(
                 entropy,
                 action_mask,
@@ -567,8 +564,6 @@ class PolicyTrainer:
                 batch_num_tokens=batch_num_tokens,
             )
             total_loss -= entropy_term * self.args.actor.entropy_coef
-        else:
-            entropy_loss = None
 
         # Stage 5: backward and optimizer step. The global token denominator
         # already normalizes over the whole optimizer-step batch, so the loss
@@ -603,6 +598,8 @@ class PolicyTrainer:
         metrics = {"policy_loss": reported_actor_loss.detach()}
         weights = {"policy_loss": "token"}
         if entropy_loss is not None:
+            metrics["entropy"] = entropy_loss.detach()
+            weights["entropy"] = "token"
             metrics["entropy_loss"] = entropy_loss.detach()
             weights["entropy_loss"] = "token"
 

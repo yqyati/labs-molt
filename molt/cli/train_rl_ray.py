@@ -601,6 +601,10 @@ if __name__ == "__main__":
         "token-mean denominator, not the paper's per-sequence 1/|y|; --actor.dual_clip is unused).",
     )
     parser.add_argument(
+        "--actor.log_entropy", action="store_true",
+        help="Log action-token entropy without adding entropy regularization to the loss.",
+    )
+    parser.add_argument(
         "--actor.entropy_coef",
         type=float,
         default=None,

@@ -19,7 +19,7 @@ export RJOB_NAME="${RJOB_NAME:-math1440-frozen-router-no-tis-no-sc-128k-no-force
 export RUN_NAME="${RUN_NAME:-math1440_frozen_router_no_tis_no_sc_128k_no_forcefinal_16gpu_8plus8_$(date +%Y%m%d_%H%M%S)}"
 
 exec bash "$SCRIPT_DIR/rjob_entry_science_vendor6000_sandbox_batch8x8_length_penalty_h200_8gpu_4plus4.sh" \
-  --actor.adam.lr 1e-6 --actor.freeze_moe_router \
+  --actor.adam.lr 1e-6 --actor.freeze_moe_router --actor.log_entropy \
   --algo.advantage.estimator reinforce_baseline \
   --actor.loss_agg_mode token-mean --actor.eps_clip_low_high 0.2 0.27 \
   --algo.advantage.is_correction_level geo \
