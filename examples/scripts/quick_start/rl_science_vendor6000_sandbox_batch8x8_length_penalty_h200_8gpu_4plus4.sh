@@ -222,6 +222,7 @@ python3 -u -m molt.cli.train_rl_ray \
   --data.max_images_per_prompt "$MAX_IMAGES_PER_PROMPT" \
   --rollout.batch_size "$ROLLOUT_BATCH_SIZE" --rollout.vllm_generate_batch_size "$ROLLOUT_VLLM_GENERATE_BATCH_SIZE" --rollout.micro_batch_size 1 \
   --rollout.n_samples_per_prompt "$N_SAMPLES_PER_PROMPT" --rollout.max_new_tokens "$MAX_NEW_TOKENS" --rollout.temperature 1.0 --rollout.top_p 1.0 \
+  --train.rollout_dump_dir "${ROLLOUT_DUMP_DIR:-$SAVE_ROOT/rollout_dump}" \
   --train.batch_size "$TRAIN_BATCH_SIZE" --train.micro_batch_size 1 --train.max_tokens_per_gpu "$TRAIN_MAX_TOKENS_PER_GPU" --train.max_epochs 1 \
   --train.num_episodes 1 --train.async_queue_size 2 --train.colocate_fsdp_models "${partial_rollout_args[@]}" \
   --actor.num_nodes 1 --actor.num_gpus_per_node "$ACTOR_GPUS_PER_NODE" \

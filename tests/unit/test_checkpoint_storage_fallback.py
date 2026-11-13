@@ -19,12 +19,21 @@ ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("checkpoint_io", ROOT / "molt/trainer/fsdp/checkpoint.py")
 checkpoint = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checkpoint)
+io_spec = importlib.util.spec_from_file_location("storage_io", ROOT / "molt/utils/io.py")
+storage_io = importlib.util.module_from_spec(io_spec)
+io_spec.loader.exec_module(storage_io)
 tree = ast.parse((ROOT / "molt/trainer/workers/policy_actor.py").read_text())
 actor = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "PolicyModelActor")
 methods = [n for n in actor.body if isinstance(n, ast.FunctionDef) and n.name in {
     "_save_with_storage_fallback", "save_checkpoint", "export_hf_model",
 }]
-namespace = {"errno": errno, "os": os, "torch_dist_barrier_and_cuda_sync": lambda: None}
+namespace = {
+    "errno": errno,
+    "os": os,
+    "is_storage_full": storage_io.is_storage_full,
+    "retry_on_storage_full": storage_io.retry_on_storage_full,
+    "torch_dist_barrier_and_cuda_sync": lambda: None,
+}
 exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.ClassDef(
     name="Actor", bases=[], keywords=[], body=methods, decorator_list=[],
 )], type_ignores=[])), "policy_actor.py", "exec"), namespace)
@@ -90,12 +99,18 @@ class CheckpointStorageTests(unittest.TestCase):
 
     def test_fallback_failure_and_disabled_fallback_propagate(self):
         save = Mock(side_effect=OSError(errno.ENOSPC, "full"))
-        with self.assertRaises(OSError):
+        retry = Mock()
+        with patch.dict(namespace, retry_on_storage_full=retry):
             self.actor._save_with_storage_fallback(save, "output_dir", "/primary")
-        self.assertEqual(save.call_count, 2)
+        self.assertEqual(retry.call_args.args[1], str(self.fallback / "primary"))
+        self.assertEqual(save.call_count, 1)
         save.reset_mock()
-        with patch.dict(os.environ, {"MOLT_CKPT_FALLBACK_ROOT": ""}), self.assertRaises(OSError):
+        retry.reset_mock()
+        with patch.dict(namespace, retry_on_storage_full=retry), patch.dict(
+            os.environ, {"MOLT_CKPT_FALLBACK_ROOT": ""}
+        ):
             self.actor._save_with_storage_fallback(save, "output_dir", "/primary")
+        self.assertEqual(retry.call_args.args[1], "/primary")
         self.assertEqual(save.call_count, 1)
 
     def test_real_dcp_save_retries_after_sidecar_quota_without_advancing_original_latest(self):
@@ -140,8 +155,8 @@ class CheckpointStorageTests(unittest.TestCase):
         ))
         strategy = self.actor.strategy
         strategy.args = args
-        strategy.save_ckpt = Mock(side_effect=[OSError(errno.EDQUOT, "full"), None])
-        strategy.save_model = Mock()
+        strategy.save_ckpt = Mock(side_effect=AssertionError("HF-only mode must not write DCP"))
+        strategy.save_model = Mock(side_effect=[OSError(errno.EDQUOT, "full"), None, None])
         strategy.prune_checkpoints = Mock()
         self.actor.actor = SimpleNamespace(model=object())
         self.actor.tokenizer = object()
@@ -149,12 +164,21 @@ class CheckpointStorageTests(unittest.TestCase):
         self.actor.save_checkpoint("global_step50", {"global_step": 50})
         self.actor.export_hf_model()
         self.assertEqual(strategy.save_model.call_args_list[0].kwargs["output_dir"],
-                         str(self.fallback / "primary/state/_hf/global_step50"))
+                         "/primary/hf/global_step50")
         self.assertEqual(strategy.save_model.call_args_list[1].kwargs["output_dir"],
+                         str(self.fallback / "primary/hf/global_step50"))
+        self.assertEqual(strategy.save_model.call_args_list[2].kwargs["output_dir"],
                          str(self.fallback / "primary/hf"))
         strategy.prune_checkpoints.assert_called_once_with(
-            str(self.fallback / "primary/state/_hf"), "global_step50", 2, 0,
+            str(self.fallback / "primary/hf"), "global_step50", 2, 0,
         )
+
+    def test_retry_on_storage_full_waits_then_succeeds(self):
+        write = Mock(side_effect=[OSError(errno.ENOSPC, "full"), OSError(errno.EDQUOT, "quota"), None])
+        with patch.object(storage_io.time, "sleep") as sleep:
+            storage_io.retry_on_storage_full(write, "/save/path", retry_interval=0)
+        self.assertEqual(write.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
 
     def test_mixed_dcp_errors_do_not_trigger_storage_retry(self):
         from torch.distributed.checkpoint.api import CheckpointException
@@ -169,8 +193,9 @@ class CheckpointStorageTests(unittest.TestCase):
                 raise wrapped
 
     def test_two_ranks_switch_together_when_only_one_rank_hits_quota(self):
-        mp.spawn(distributed_writer, args=(str(self.root / "rendezvous"), str(self.root)),
-                 nprocs=2, join=True)
+        with patch.dict(os.environ, {"GLOO_SOCKET_IFNAME": "lo"}):
+            mp.spawn(distributed_writer, args=(str(self.root / "rendezvous"), str(self.root)),
+                     nprocs=2, join=True)
         records = [json.loads((self.root / f"rank{rank}.json").read_text()) for rank in range(2)]
         self.assertEqual(records[0], records[1])
         self.assertEqual(len(records[0]["calls"]), 2)

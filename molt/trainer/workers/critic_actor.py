@@ -364,23 +364,23 @@ class CriticModelActor(BaseModelActor):
 
     def save_checkpoint(self, tag, client_states=None, metric_value=None, metric_key=None):
         args = self.strategy.args
-        # Resumable DCP checkpoint only — the critic is a value model, never an
-        # HF-exported servable policy.
-        self.strategy.save_ckpt(
-            self.critic.model,
-            os.path.join(args.ckpt.path, "_critic"),
-            tag,
-            args.ckpt.dcp_max_num,
-            args.ckpt.max_mem,
-            client_states or {},
-            # Forward the actor's eval metric so the critic's retention/pruning
-            # (sorted by metric in _prune_checkpoints) makes the SAME keep/drop
-            # decisions as the actor — otherwise the critic prunes by recency
-            # only and the two checkpoint sets desync (a step the actor keeps for
-            # its metric may have its _critic dir pruned).
-            metric_value=metric_value,
-            metric_key=metric_key,
-            optimizer=self.critic_optim if args.ckpt.save_optimizer else None,
-            scheduler=self.critic_scheduler if args.ckpt.save_optimizer else None,
-        )
+        if args.ckpt.save_hf:
+            self.strategy.save_model(
+                self.critic,
+                self.tokenizer,
+                os.path.join(args.ckpt.output_dir, "_critic", tag),
+            )
+        else:
+            self.strategy.save_ckpt(
+                self.critic.model,
+                os.path.join(args.ckpt.path, "_critic"),
+                tag,
+                args.ckpt.dcp_max_num,
+                args.ckpt.max_mem,
+                client_states or {},
+                metric_value=metric_value,
+                metric_key=metric_key,
+                optimizer=self.critic_optim if args.ckpt.save_optimizer else None,
+                scheduler=self.critic_scheduler if args.ckpt.save_optimizer else None,
+            )
         torch_dist_barrier_and_cuda_sync()

@@ -39,6 +39,7 @@ exec bash "$SCRIPT_DIR/rjob_entry_science_legacy_react_h200_8gpu_4plus4.sh" \
   --algo.advantage.is_correction_mode mask --algo.advantage.is_correction_threshold 0.5 5.0 \
   --algo.advantage.score_centering_top_k 0 \
   --train.async_queue_size 2 --train.partial_rollout_enable \
-  --ckpt.save_steps 100 \
+  --train.rollout_dump_dir "" \
+  --ckpt.save_steps 50 --ckpt.save_hf \
   --rollout.temperature 1.0 --rollout.top_p 1.0 --train.max_epochs 1 \
   "$@"

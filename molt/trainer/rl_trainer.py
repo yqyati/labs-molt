@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import copy
 import json
 import os
 import statistics
@@ -788,7 +789,8 @@ class GenerateSamplesActor:
                     if self.args.train.rollout_dump_dir and rollout_samples:
                         os.makedirs(self.args.train.rollout_dump_dir, exist_ok=True)
                         dump_path = os.path.join(self.args.train.rollout_dump_dir, f"rollout_step{global_step}.pt")
-                        torch.save(rollout_samples, dump_path)
+                        # Persist tensors, not Ray handles that expire when runners stop.
+                        torch.save([copy.copy(sample).reload() for sample in rollout_samples], dump_path)
                         logger.info(f"[rollout_dump] wrote {len(rollout_samples)} samples to {dump_path}")
 
                 if rollout_samples:

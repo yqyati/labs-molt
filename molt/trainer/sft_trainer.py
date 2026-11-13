@@ -331,20 +331,21 @@ class SFTTrainer:
         # TODO: save best model on dev, use loss/perplexity on whole dev dataset as metric
         if global_step % args.ckpt.save_steps == 0:
             tag = f"global_step{global_step}"
-            self.strategy.save_ckpt(
-                self.model,
-                args.ckpt.path,
-                tag,
-                args.ckpt.dcp_max_num,
-                args.ckpt.max_mem,
-                client_states,
-                optimizer=self.optimizer,
-                scheduler=self.scheduler,
-            )
             if self.save_hf_ckpt:
-                hf_root = os.path.join(args.ckpt.path, "_hf")
+                hf_root = args.ckpt.output_dir
                 self.strategy.save_model(self.model, self.tokenizer, os.path.join(hf_root, tag))
                 self.strategy.prune_checkpoints(hf_root, tag, args.ckpt.max_num, args.ckpt.max_mem)
+            else:
+                self.strategy.save_ckpt(
+                    self.model,
+                    args.ckpt.path,
+                    tag,
+                    args.ckpt.dcp_max_num,
+                    args.ckpt.max_mem,
+                    client_states,
+                    optimizer=self.optimizer,
+                    scheduler=self.scheduler,
+                )
 
     def evaluate(self, eval_dataloader, steps=0):
         self.model.eval()

@@ -89,8 +89,8 @@ def add_ckpt_args(parser, default_ckpt_path: str) -> None:
     parser.add_argument(
         "--ckpt.save_hf",
         action="store_true",
-        default=False,
-        help="Also export an HF-format snapshot alongside each resumable checkpoint.",
+        default=True,
+        help="Save HF-format snapshots at checkpoint steps (the default).",
     )
     parser.add_argument(
         "--ckpt.disable_final_save",

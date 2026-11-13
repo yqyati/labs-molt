@@ -38,6 +38,7 @@ from molt.trainer.fsdp import FsdpStrategy
 from molt.trainer.fsdp.refit import gather_full_param
 from molt.utils import get_tokenizer
 from molt.utils.distributed_util import stateless_init_process_group, torch_dist_barrier_and_cuda_sync
+from molt.utils.io import is_storage_full, retry_on_storage_full
 from molt.utils.logging_utils import init_logger
 from molt.utils.vlm_utils import merge_mm_train_inputs
 
@@ -966,13 +967,16 @@ class PolicyModelActor(BaseModelActor):
         destination = fallback if fallback and getattr(self, "_checkpoint_fallback_active", False) else path
         try:
             save(**{path_key: destination}, **kwargs)
-        except OSError as exc:
-            if exc.errno not in (errno.ENOSPC, errno.EDQUOT) or not fallback or destination == fallback:
+        except Exception as exc:
+            if not is_storage_full(exc):
                 raise
-            self.strategy.print(f"Checkpoint storage full at {path}; retrying at {fallback}")
-            save(**{path_key: fallback}, **kwargs)
-            destination = fallback
-            self._checkpoint_fallback_active = True
+            if fallback and destination != fallback:
+                destination = fallback
+                self.strategy.print(f"Storage full at {path}; switching save to {fallback}")
+                self._checkpoint_fallback_active = True
+            else:
+                self.strategy.print(f"Storage full at {destination}; waiting for space")
+            retry_on_storage_full(lambda: save(**{path_key: destination}, **kwargs), destination)
         self.strategy.print(f"Checkpoint saved at {destination}")
         return destination
 
@@ -1034,22 +1038,23 @@ class PolicyModelActor(BaseModelActor):
     def save_checkpoint(self, tag, client_states=None, metric_value=None, metric_key=None):
         args = self.strategy.args
         client_states = client_states or {}
-        self._save_with_storage_fallback(
-            self.strategy.save_ckpt, "ckpt_path", os.path.join(args.ckpt.path, "_actor"),
-            model=self.actor.model, tag=tag, max_num=args.ckpt.dcp_max_num,
-            max_mem=args.ckpt.max_mem, client_states=client_states,
-            metric_value=metric_value,
-            metric_key=metric_key,
-            optimizer=self.actor_optim if args.ckpt.save_optimizer else None,
-            scheduler=self.actor_scheduler if args.ckpt.save_optimizer else None,
-        )
         if self.save_hf_ckpt:
-            # Versioned HF export mirrors the DCP layout (_actor/<tag>) and gets its own
-            # recency pruning, so save_hf can run every step without unbounded disk growth.
-            hf_root = os.path.join(args.ckpt.path, "_hf")
+            # HF-only mode: do not create the distributed DCP/sharded checkpoint.
+            # This is a weights snapshot and cannot restore optimizer state.
+            hf_root = args.ckpt.output_dir
             saved = self._save_with_storage_fallback(
                 self.strategy.save_model, "output_dir", os.path.join(hf_root, tag),
                 model=self.actor, tokenizer=self.tokenizer,
             )
             self.strategy.prune_checkpoints(os.path.dirname(saved), tag, args.ckpt.max_num, args.ckpt.max_mem)
+        else:
+            self._save_with_storage_fallback(
+                self.strategy.save_ckpt, "ckpt_path", os.path.join(args.ckpt.path, "_actor"),
+                model=self.actor.model, tag=tag, max_num=args.ckpt.dcp_max_num,
+                max_mem=args.ckpt.max_mem, client_states=client_states,
+                metric_value=metric_value,
+                metric_key=metric_key,
+                optimizer=self.actor_optim if args.ckpt.save_optimizer else None,
+                scheduler=self.actor_scheduler if args.ckpt.save_optimizer else None,
+            )
         torch_dist_barrier_and_cuda_sync()
