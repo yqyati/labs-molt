@@ -129,3 +129,61 @@ def test_rollout_ray_actor_init_is_synchronous():
     """Ray actor constructors are synchronous; an async __init__ would not be awaited."""
     actor_cls = getattr(vllm_engine.RolloutRayActor, "__ray_actor_class__", vllm_engine.RolloutRayActor)
     assert not inspect.iscoroutinefunction(actor_cls.__init__)
+
+
+def test_partial_routing_audit_tracks_real_pause_boundary_and_detects_corruption(capsys):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import numpy as np
+    import pytest
+
+    actor_cls = getattr(vllm_engine.RolloutRayActor, "__ray_metadata__", None)
+    actor_cls = actor_cls.modified_class if actor_cls else vllm_engine.RolloutRayActor
+    routes = np.arange(12).reshape(3, 2, 2)
+
+    async def scenario(corrupt=False, active=True):
+        actor = object.__new__(actor_cls)
+        actor._partial_audit = True
+        actor._partial_snapshots = {}
+        actor._partial_boundary = 0
+        state = SimpleNamespace(
+            detokenizer=SimpleNamespace(output_token_ids=[20, 21]),
+            logprobs_processor=SimpleNamespace(logprobs=[{20: -0.1}, {21: -0.2}]),
+            routed_experts_chunks=[routes.copy()], request_index=0,
+        )
+        actor.llm = SimpleNamespace(
+            pause_generation=AsyncMock(),
+            output_processor=SimpleNamespace(
+                external_req_ids={"r": ["internal"]} if active else {},
+                request_states={"internal": state},
+            ),
+        )
+        await actor.pause_generation()
+        actor.llm.pause_generation.assert_awaited_once_with(mode="keep")
+        finished_routes = np.concatenate([routes, np.ones((1, 2, 2), dtype=int)])
+        if corrupt:
+            finished_routes[0, 0, 0] += 1
+        completion = SimpleNamespace(
+            index=0, token_ids=[20, 21, 22], logprobs=[{20: -0.1}, {21: -0.2}, {22: -0.3}],
+            routed_experts=finished_routes, finish_reason="length",
+        )
+
+        async def generate(*args, **kwargs):
+            yield SimpleNamespace(finished=True, request_id="r", prompt_token_ids=[1, 2], outputs=[completion])
+
+        actor._original_generate = generate
+        outputs = [o async for o in actor._generate_with_partial_audit(None, None, "r")]
+        assert len(outputs) == 1 and not actor._partial_snapshots
+
+    asyncio.run(scenario())
+    log = capsys.readouterr().out
+    assert '"generated_tokens": 2' in log and '"continued": true' in log
+    assert '"prefix_preserved": true' in log
+    with pytest.raises(AssertionError):
+        asyncio.run(scenario(corrupt=True))
+    assert "[partial_routing] FAIL" in capsys.readouterr().out
+    asyncio.run(scenario(active=False))
+    log = capsys.readouterr().out
+    assert '"active_requests": 0' in log and '"event": "finished"' not in log

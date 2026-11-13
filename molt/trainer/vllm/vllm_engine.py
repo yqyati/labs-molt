@@ -19,6 +19,7 @@
 import asyncio
 import dataclasses
 import inspect
+import json
 import os
 from typing import Any, List, Optional
 
@@ -117,6 +118,12 @@ class RolloutRayActor:
 
         engine_args = vllm.AsyncEngineArgs(*args, **_filter_vllm_engine_kwargs(self.kwargs))
         self.llm = vllm.AsyncLLMEngine.from_engine_args(engine_args)
+        self._partial_audit = os.environ.get("MOLT_AUDIT_PARTIAL_ROUTING") == "1"
+        self._partial_snapshots = {}
+        self._partial_boundary = 0
+        if self._partial_audit:
+            self._original_generate = self.llm.generate
+            self.llm.generate = self._generate_with_partial_audit
         print("vLLM AsyncLLMEngine constructed", flush=True)
 
     async def ready(self) -> bool:
@@ -245,8 +252,77 @@ class RolloutRayActor:
             return None
         return sorted(set.intersection(*(set(names) for names in results)))
 
+    async def _generate_with_partial_audit(self, *args, **kwargs):
+        import numpy as np
+
+        request_id = kwargs.get("request_id", args[2] if len(args) > 2 else None)
+        try:
+            async for output in self._original_generate(*args, **kwargs):
+                if output.finished:
+                    for completion in output.outputs:
+                        key = (output.request_id, completion.index)
+                        for boundary, tokens, logprobs, routing in self._partial_snapshots.pop(key, []):
+                            try:
+                                assert list(completion.token_ids[:len(tokens)]) == tokens, "old tokens changed"
+                                assert completion.logprobs[:len(logprobs)] == logprobs, "old logprobs changed"
+                                assert completion.routed_experts is not None, "routing missing"
+                                np.testing.assert_array_equal(completion.routed_experts[:len(routing)], routing)
+                                expected = len(output.prompt_token_ids) + len(completion.token_ids) - 1
+                                assert len(completion.routed_experts) == expected, "routing/token length mismatch"
+                            except (AssertionError, TypeError) as exc:
+                                print(f"[partial_routing] FAIL request={output.request_id} boundary={boundary}: {exc}",
+                                      flush=True)
+                                raise
+                            print("[partial_routing] " + json.dumps({
+                                "event": "finished", "boundary": boundary, "request_id": output.request_id,
+                                "tokens_at_pause": len(tokens), "tokens_at_finish": len(completion.token_ids),
+                                "continued": len(completion.token_ids) > len(tokens),
+                                "prefix_preserved": True, "routing_rows": expected,
+                                "finish_reason": str(completion.finish_reason),
+                            }), flush=True)
+                yield output
+        finally:
+            for key in list(self._partial_snapshots):
+                if key[0] == request_id:
+                    for snapshot in self._partial_snapshots.pop(key):
+                        print(f"[partial_routing] UNVERIFIED request={request_id} boundary={snapshot[0]}", flush=True)
+
     async def pause_generation(self):
         await self.llm.pause_generation(mode="keep")
+        if not self._partial_audit:
+            return
+        from copy import deepcopy
+
+        import numpy as np
+
+        self._partial_boundary += 1
+        processor = self.llm.output_processor
+        active = generating = captured = 0
+        for external_id, internal_ids in processor.external_req_ids.items():
+            for internal_id in internal_ids:
+                state = processor.request_states.get(internal_id)
+                if state is None:
+                    continue
+                active += 1
+                tokens = list(state.detokenizer.output_token_ids)
+                if not tokens:
+                    continue
+                generating += 1
+                if not state.routed_experts_chunks:
+                    print(f"[partial_routing] MISSING_ROUTING request={external_id}", flush=True)
+                    continue
+                routing = np.concatenate(state.routed_experts_chunks).copy()
+                snapshot = (self._partial_boundary, tokens, deepcopy(state.logprobs_processor.logprobs), routing)
+                self._partial_snapshots.setdefault((external_id, state.request_index), []).append(snapshot)
+                captured += 1
+                print("[partial_routing] " + json.dumps({
+                    "event": "snapshot", "boundary": self._partial_boundary, "request_id": external_id,
+                    "generated_tokens": len(tokens), "routing_rows": len(routing),
+                }), flush=True)
+        print("[partial_routing] " + json.dumps({
+            "event": "paused", "boundary": self._partial_boundary, "active_requests": active,
+            "requests_with_tokens": generating, "snapshots": captured,
+        }), flush=True)
 
     async def resume_generation(self):
         await self.llm.resume_generation()

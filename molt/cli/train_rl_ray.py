@@ -32,6 +32,9 @@ def _ray_runtime_env_vars():
         "RAY_ENABLE_ZERO_COPY_TORCH_TENSORS": os.environ.get("RAY_ENABLE_ZERO_COPY_TORCH_TENSORS", "1"),
     }
     for name in (
+        "MOLT_AUDIT_PARTIAL_ROUTING",
+        "MOLT_MOE_EXPERTS",
+        "MOLT_LINEAR_BACKEND",
         "FLASHINFER_WORKSPACE_BASE",
         "FLASHINFER_WORKSPACE_DIR",
         "HF_HOME",
@@ -919,7 +922,7 @@ if __name__ == "__main__":
         default=False,
         help="R3: capture the rollout router's per-token expert selection (vLLM) and replay it in "
         "the training forward (AutoModel RouterReplay) so MoE training/rollout routing match. "
-        "MoE models only; incompatible with --train.partial_rollout_enable (preemption drops routing).",
+        "MoE models only; supports --train.partial_rollout_enable with vLLM keep-mode pause/resume.",
     )
     # Debug / repro: dump a rollout batch and replay it train-only (skip generation) to
     # iterate on the training+refit path in isolation; check_weight_update_equal checks every broadcast.
@@ -1179,12 +1182,6 @@ if __name__ == "__main__":
     # --- Parallelism / FSDP ---
     if args.fsdp.pp_size > 1:
         raise NotImplementedError("Molt trainers are not pipeline-parallel aware yet; set --fsdp.pp_size 1")
-
-    if args.train.routing_replay and args.train.partial_rollout_enable:
-        # vLLM frees a request's captured routing on preemption, and partial
-        # rollout preempts in-flight requests at every weight sync -> the routing
-        # for those tokens would be lost. Keep partial rollout off under R3.
-        raise ValueError("--train.routing_replay is incompatible with --train.partial_rollout_enable.")
 
     if args.train.routing_replay and args.vllm.mtp_num_speculative_tokens > 0:
         # The engine's routed-experts capture misaligns under speculative decoding:

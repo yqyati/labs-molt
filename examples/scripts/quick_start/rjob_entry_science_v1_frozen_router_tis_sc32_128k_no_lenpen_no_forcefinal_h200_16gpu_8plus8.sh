@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Science v1 with token-level truncated IS, score centering and entropy monitoring.
+# Science v1 with router replay, geo IS correction and no score centering.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,18 +15,18 @@ export MAX_LEN=131072 MAX_NEW_TOKENS=131072
 export TRAIN_MAX_TOKENS_PER_GPU="${TRAIN_MAX_TOKENS_PER_GPU:-25000}"
 export AGENT_CONTEXT_COMPACTION=0 AGENT_EVAL_FORCE_FINALIZE=0
 export AGENT_CONTEXT_COMPACT_THRESHOLD_TOKENS=86016
-export RJOB_NAME="${RJOB_NAME:-science-v1-frozen-router-tis-sc32-128k-no-lenpen-16gpu}"
-export RUN_NAME="${RUN_NAME:-science_v1_frozen_router_tis_sc32_128k_no_lenpen_no_forcefinal_16gpu_8plus8_$(date +%Y%m%d_%H%M%S)}"
+export RJOB_NAME="${RJOB_NAME:-science-v1-router-replay-geo-no-tis-no-sc-128k-16gpu}"
+export RUN_NAME="${RUN_NAME:-science_v1_router_replay_geo_no_tis_no_sc_128k_no_lenpen_no_forcefinal_16gpu_8plus8_$(date +%Y%m%d_%H%M%S)}"
 
 exec bash "$SCRIPT_DIR/rjob_entry_science_vendor6000_sandbox_batch8x8_length_penalty_h200_8gpu_4plus4.sh" \
-  --actor.adam.lr 1e-6 --actor.freeze_moe_router --actor.log_entropy \
+  --actor.adam.lr 1e-6 --actor.log_entropy \
   --algo.advantage.estimator reinforce_baseline \
   --actor.loss_agg_mode token-mean --actor.eps_clip_low_high 0.2 0.27 \
-  --algo.advantage.is_correction_level token \
+  --algo.advantage.is_correction_level geo \
   --algo.advantage.is_correction_gating ratio \
-  --algo.advantage.is_correction_mode trunc --algo.advantage.is_correction_threshold 2.0 \
-  --algo.advantage.score_centering_top_k 32 \
-  --train.async_queue_size 2 --train.partial_rollout_enable \
-  --ckpt.save_steps 100 \
+  --algo.advantage.is_correction_mode mask --algo.advantage.is_correction_threshold 0.5 5.0 \
+  --algo.advantage.score_centering_top_k 0 \
+  --train.async_queue_size 2 --train.partial_rollout_enable --train.routing_replay \
+  --ckpt.save_steps 50 \
   --rollout.temperature 1.0 --rollout.top_p 1.0 --train.max_epochs 1 \
   "$@"

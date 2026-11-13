@@ -362,3 +362,46 @@ def test_score_centering_rejects_missing_candidate_rows():
     sp = SimpleNamespace(max_tokens=8, temperature=1.0, top_p=1.0, logprobs=32)
     with pytest.raises(RuntimeError, match="exactly 32"):
         asyncio.run(RouterGenerateClient(_FakeHttp({GEN: _gen_resp([9])})).generate([1, 2], sp))
+
+
+@pytest.mark.parametrize("segment_lengths", [(8, 8), (8, 9, 8, 7)])
+@pytest.mark.parametrize("truncate", [False, True])
+def test_partial_routing_http_to_training_preserves_segments(segment_lengths, truncate):
+    import torch
+
+    from molt.agents.base import Trajectory
+    from molt.models.base import BaseModel
+    from molt.trainer.rollout.samples_generator import SamplesGenerator
+
+    prompt = [1, 2, 3]
+    ids = list(range(10, 10 + sum(segment_lengths)))
+    # Distinct rows make duplicated prefixes, overwritten segments and shifts visible.
+    rows = len(prompt) + len(ids) - 1
+    routing = (np.arange(rows * 3 * 2).reshape(rows, 3, 2) % 128).astype(np.uint8)
+    resp = _gen_resp(ids, routed=_npy_b64(routing))
+    output, off_policy_len = asyncio.run(
+        RouterGenerateClient(_FakeHttp({GEN: resp})).generate(prompt, _sp())
+    )
+    traj = Trajectory(
+        prompt="p", label="", images=None, observation_text="", observation_tokens=prompt.copy(),
+        rollout_log_probs=[0.0] * len(prompt),
+    )
+    completion = output.outputs[0]
+    logprobs = [entry[token].logprob for token, entry in zip(ids, completion.logprobs)]
+    traj.append_action(completion.token_ids, logprobs, off_policy_len=off_policy_len)
+    traj.absorb_routing(output)
+    assert traj.routed_experts[-1] is None
+    np.testing.assert_array_equal(np.stack(traj.routed_experts[:-1]), routing)
+
+    limit = len(prompt) + len(ids) - (3 if truncate else 0)
+    exp, drop = SamplesGenerator._process_response_into_experience(traj, media_ids=set(), truncate_length=limit)
+    assert drop is None
+    assert exp.sequences[0].tolist() == (prompt + ids)[:limit]
+    assert exp.routed_experts.dtype == torch.int16
+    expected = np.concatenate([routing.astype(np.int16), np.full((1, 3, 2), -1, dtype=np.int16)])[:limit]
+    np.testing.assert_array_equal(exp.routed_experts[0].permute(2, 0, 1).numpy(), expected)
+    stub = SimpleNamespace(packing_samples=False, _num_routing_gates=3, _moe_layer_global_ids=[0, 1, 2])
+    targets = BaseModel._build_routing_targets(stub, exp.routed_experts, indices=None, cp_forward=False)
+    for layer, target in enumerate(targets):
+        np.testing.assert_array_equal(target.numpy(), expected[:, layer])
+    np.testing.assert_allclose(exp.rollout_log_probs[0].numpy(), ([0.0] * 2 + logprobs)[:limit - 1])

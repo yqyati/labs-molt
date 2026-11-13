@@ -8,11 +8,7 @@ REPO_ROOT="${MOLT_PATH:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 GPFS2_ROOT="${GPFS2_ROOT:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2}"
 SCI_RESEARCH_ROOT="${SCI_RESEARCH_ROOT:-$GPFS2_ROOT/scientific_reasoning_and_research}"
 
-SFT_MODEL_PATH="${SFT_MODEL_PATH:-$SCI_RESEARCH_ROOT/science_model/tool_models/sft_qwen35_35b_distill_K3_tool_4set_k26_nemotron_science_k3_four_tools-128k-1019-233733/checkpoint/saved/hf_iter_0000479}"
-BASE_MODEL_PATH="${BASE_MODEL_PATH:-$SCI_RESEARCH_ROOT/model/Qwen3.5-35B-A3B}"
-export MODEL_PATH="${MODEL_PATH:-$GPFS2_ROOT/yangqingyu/workspace/science_training_reports/models/qwen35_sft479_with_base_visual}"
-python3 "$SCRIPT_DIR/prepare_qwen35_sft_visual_overlay.py" \
-  --sft-model "$SFT_MODEL_PATH" --base-model "$BASE_MODEL_PATH" --output "$MODEL_PATH"
+export MODEL_PATH="${MODEL_PATH:-$SCI_RESEARCH_ROOT/yangqingyu/model/qwen35_sft479_nemo_moe_visual}"
 export DATASET="${DATASET:-$SCI_RESEARCH_ROOT/yangqingyu/rft/molt_science_legacy/train.jsonl}"
 export MAX_SAMPLES="${MAX_SAMPLES:-3000}"
 export N_SAMPLES_PER_PROMPT=8 ROLLOUT_BATCH_SIZE=8 TRAIN_BATCH_SIZE=64

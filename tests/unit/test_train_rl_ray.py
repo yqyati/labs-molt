@@ -14,6 +14,8 @@ def test_ray_runtime_env_forwards_wandb_settings(monkeypatch):
         "WANDB_API_KEY": "test-api-key",
         "WANDB_ENTITY": "test-entity",
         "WANDB_MODE": "offline",
+        "MOLT_MOE_EXPERTS": "torch",
+        "MOLT_LINEAR_BACKEND": "torch",
     }
     for name, value in expected.items():
         monkeypatch.setenv(name, value)
@@ -54,3 +56,47 @@ def test_score_centering_rejects_unsupported_config_before_starting_workers(flag
     assert result.returncode != 0
     assert message in result.stderr
     assert "ray.init" not in result.stderr
+
+
+@pytest.mark.parametrize("surplus_batch", [False, True])
+@pytest.mark.parametrize("unsupported", [None, "mtp", "uncorrected"])
+def test_routing_replay_partial_rollout_cli(monkeypatch, surplus_batch, unsupported):
+    import ast
+    from pathlib import Path
+    from types import ModuleType
+    from unittest.mock import Mock
+
+    from molt.cli import train_rl_ray
+
+    # Run the real CLI body, replacing only worker startup and the optional backend import.
+    source = Path(train_rl_ray.__file__)
+    entrypoint = ast.parse(source.read_text()).body[-1]
+    assert isinstance(entrypoint, ast.If)
+    for name in ("nemo_automodel", "nemo_automodel.components", "nemo_automodel.components.moe",
+                 "nemo_automodel.components.moe.router_replay"):
+        monkeypatch.setitem(sys.modules, name, ModuleType(name))
+    flags = [
+        "train_rl_ray", "--actor.model_name_or_path", "unused", "--train.agent_path", "unused.py",
+        "--vllm.num_engines", "1", "--train.routing_replay", "--rollout.top_p", "1.0",
+        "--algo.advantage.is_correction_level", "off" if unsupported == "uncorrected" else "geo",
+    ]
+    flags += (["--rollout.batch_size", "8", "--rollout.vllm_generate_batch_size", "16"]
+              if surplus_batch else ["--train.partial_rollout_enable"])
+    if unsupported == "mtp":
+        flags += ["--vllm.mtp_num_speculative_tokens", "1"]
+    monkeypatch.setattr(sys, "argv", flags)
+    start_workers = Mock()
+    namespace = {**vars(train_rl_ray), "train": start_workers}
+    code = compile(ast.Module(body=entrypoint.body, type_ignores=[]), str(source), "exec")
+    if unsupported:
+        message = "mtp_num_speculative_tokens is incompatible" if unsupported == "mtp" else "Off-policy rollout"
+        with pytest.raises(ValueError, match=message):
+            exec(code, namespace)
+        start_workers.assert_not_called()
+    else:
+        exec(code, namespace)
+        start_workers.assert_called_once()
+        args = start_workers.call_args.args[0]
+        assert args.train.routing_replay and args.train.partial_rollout_enable
+        assert not args.train.force_sync_mode
+        assert args.algo.advantage.is_correction_level == "geo"

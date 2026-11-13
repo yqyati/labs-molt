@@ -330,9 +330,11 @@ class BaseModel(nn.Module):
         compute_dtype = convert_to_torch_dtype(param_dtype)
         is_moe = _detect_moe_arch(pretrain_or_model)
         ep_active = moe_mesh is not None
-        if is_moe and not ep_active:
-            raise ValueError("MoE models require --fsdp.ep_size > 1 in the AutoModel custom-only branch.")
         use_hf_model = _will_use_hf_model(pretrain_or_model)
+        if is_moe and not ep_active:
+            world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+            if use_hf_model or world_size != 1:
+                raise ValueError("MoE without EP requires a native AutoModel model and a single training rank.")
         # EP dispatch is a nemo_automodel custom-path feature; HF has no equivalent. An
         # HF-fallback model under active EP would silently mis-shard experts / train on
         # wrong grads, so forbid it loudly. (TP/CP run on HF, so they aren't gated here.)
@@ -407,7 +409,10 @@ class BaseModel(nn.Module):
             # importability, silently changing the training path). Default hybridep to
             # match AutoModel; == deepep on intra-node NVLink. Override MOLT_MOE_DISPATCHER
             # (d580 recipes pin deepep — cross-node hybridep/DOCA-GPUNetIO fails there).
-            backend_cfg["dispatcher"] = os.environ.get("MOLT_MOE_DISPATCHER", "hybridep")
+            # A single-rank MoE uses local experts; no EP communication backend is needed.
+            backend_cfg["dispatcher"] = (
+                "torch" if is_moe and not ep_active else os.environ.get("MOLT_MOE_DISPATCHER", "hybridep")
+            )
             # Linear (GEMM) + experts backend follow the attention choice by default
             # (TE attn -> TE linear/experts, else torch). Some models decouple them
             # (e.g. sparse-attn arch needs sdpa but wants TE linear + gmm experts), so

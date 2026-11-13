@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Three-GPU RL smoke: EP=2 actor, one vLLM; preserve async partial rollout.
+set -euo pipefail
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT"
+export MODEL_PATH="${MODEL_PATH:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2/scientific_reasoning_and_research/science_model/tool_models/hf_models/p1_rollout1_kimi2.6_subset_kimi_prompt_sft_qwen3.5_35b-0511-201941}"
+export RUN_DIR="${RUN_DIR:-$REPO_ROOT/outputs/partial-routing-3gpu-$(date +%Y%m%d-%H%M%S)}"
+export TOKENIZERS_PARALLELISM=false
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export RAY_USAGE_STATS_ENABLED=0
+export WANDB_MODE="${WANDB_MODE:-disabled}"
+export MAX_AGENT_TURNS=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+python - <<'PY'
+import os
+from pathlib import Path
+import torch
+assert torch.cuda.device_count() >= 3, 'This MoE test needs three visible GPUs (EP=2 actor + one vLLM).'
+assert (Path(os.environ['MODEL_PATH']) / 'config.json').is_file(), 'MODEL_PATH is not accessible.'
+for i in range(3):
+    p = torch.cuda.get_device_properties(i)
+    print(f'GPU {i}: {p.name}, {p.total_memory / 2**30:.1f} GiB')
+PY
+mkdir -p "$RUN_DIR"
+python -u -m molt.cli.train_rl_ray \
+  --actor.model_name_or_path "$MODEL_PATH" \
+  --actor.num_nodes 1 --actor.num_gpus_per_node 2 \
+  --actor.lora_dim 8 --actor.lora_alpha 16 \
+  --actor.lora_target_modules '*.q_proj' '*.v_proj' \
+  --actor.freeze_visual_encoder --actor.freeze_moe_router \
+  --actor.gradient_checkpoint full --actor.adam.lr 1e-5 \
+  --data.prompt_dataset "$REPO_ROOT/tests/integration/data/arithmetic_rl_smoke.jsonl" \
+  --data.input_key prompt --data.label_key label --data.apply_chat_template \
+  --data.max_samples 24 --data.max_len 2048 \
+  --rollout.batch_size 4 --rollout.n_samples_per_prompt 4 \
+  --rollout.vllm_generate_batch_size 8 --rollout.micro_batch_size 1 \
+  --rollout.max_new_tokens 1024 --rollout.temperature 1.0 --rollout.top_p 1.0 \
+  --train.batch_size 16 --train.micro_batch_size 1 \
+  --train.max_epochs 1 --train.num_episodes 1 --train.async_queue_size 2 \
+  --train.partial_rollout_enable --train.routing_replay \
+  --train.agent_path "$REPO_ROOT/examples/python/agents/math.py" \
+  --train.check_weight_update_equal --train.rollout_dump_dir "$RUN_DIR/rollouts" \
+  --algo.advantage.estimator reinforce_baseline \
+  --algo.advantage.is_correction_level geo \
+  --algo.advantage.is_correction_gating ratio --algo.advantage.is_correction_mode mask \
+  --algo.advantage.is_correction_threshold 0.5 5.0 \
+  --algo.kl.init_coef 0 \
+  --vllm.num_engines 1 --vllm.tensor_parallel_size 1 \
+  --vllm.distributed_executor_backend mp --vllm.sync_backend nccl \
+  --vllm.gpu_memory_utilization 0.8 --vllm.enable_prefix_caching \
+  --fsdp.param_dtype bf16 --fsdp.attn_implementation flash_attention_2 \
+  --fsdp.tp_size 1 --fsdp.ep_size 2 --fsdp.cp_size 1 \
+  --fsdp.offload optimizer \
+  --ckpt.path "$RUN_DIR/checkpoints" --ckpt.output_dir "$RUN_DIR/final_hf" \
+  --ckpt.save_steps -1 --logger.logging_steps 1 \
+  "$@" 2>&1 | tee "$RUN_DIR/train.log"
+printf 'Training finished. Inspect gradients, rewards, refit and preemption logs: %s\n' "$RUN_DIR/train.log"
+printf 'Rollouts: %s\nFinal model: %s\n' "$RUN_DIR/rollouts" "$RUN_DIR/final_hf"
