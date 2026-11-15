@@ -56,6 +56,8 @@ print(f"qwen-agent import ok: {qwen_agent.__file__}")
 print(f"Legacy ReAct import ok: {MultiTurnReactAgent.__module__}")
 PY
 
+"$PYTHON_BIN" "$REPO_ROOT/examples/python/patch_nemo_checkpoint.py"
+
 cd "$REPO_ROOT"
 export RUN_NAME="${RUN_NAME:-science_agent_async_training_8gpu_4plus4_$(date +%Y%m%d_%H%M%S)}"
 echo "rjob_name=$RJOB_NAME run_name=$RUN_NAME train_script=$TRAIN_SCRIPT"

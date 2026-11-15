@@ -39,6 +39,56 @@ exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.ClassDef(
 )], type_ignores=[])), "policy_actor.py", "exec"), namespace)
 
 
+patch_spec = importlib.util.spec_from_file_location("metadata_patch", ROOT / "examples/python/patch_nemo_checkpoint.py")
+metadata_patch = importlib.util.module_from_spec(patch_spec)
+patch_spec.loader.exec_module(metadata_patch)
+
+
+def metadata_writer(rank, rendezvous, directory):
+    import contextlib
+    from datetime import timedelta
+    import re
+    import torch
+
+    dist.init_process_group("gloo", init_method="file://" + rendezvous,
+                            rank=rank, world_size=2, timeout=timedelta(seconds=15))
+    try:
+        scope = dict(contextlib=contextlib, errno=errno, re=re, torch=torch)
+        exec(metadata_patch.METADATA_WRITE, scope)
+        actor = namespace["Actor"]()
+        actor.strategy = SimpleNamespace(print=lambda *a: None)
+        manager = checkpoint.CheckpointManager(SimpleNamespace())
+        calls = []
+
+        def save(output_dir):
+            calls.append(output_dir)
+            with manager._checkpoint_write():
+                with scope["_molt_metadata_write"](None):
+                    if rank == 0 and len(calls) <= 3:
+                        raise OSError(errno.EDQUOT, "injected metadata quota failure")
+                    if rank == 0:
+                        Path(output_dir).mkdir(parents=True, exist_ok=True)
+                        Path(output_dir, "metadata.json").write_text("{}")
+
+        roots = os.pathsep.join((directory + "/fallback1", directory + "/fallback2"))
+        with patch.dict(os.environ, {"MOLT_CKPT_FALLBACK_ROOT": roots}), patch.object(storage_io.time, "sleep"):
+            saved = actor._save_with_storage_fallback(save, "output_dir", directory + "/primary")
+        assert Path(saved, "metadata.json").is_file()
+        Path(directory, f"metadata-rank{rank}.json").write_text(json.dumps({"calls": calls, "saved": saved}))
+        with scope["_molt_metadata_write"](None):
+            pass
+        try:
+            with scope["_molt_metadata_write"](None):
+                if rank == 0:
+                    raise OSError(errno.EACCES, "permission denied")
+        except RuntimeError as exc:
+            assert "permission denied" in str(exc)
+        else:
+            raise AssertionError("Non-storage errors must propagate on every rank")
+    finally:
+        dist.destroy_process_group()
+
+
 def distributed_writer(rank, rendezvous, directory):
     from datetime import timedelta
 
@@ -78,7 +128,7 @@ class CheckpointStorageTests(unittest.TestCase):
     def test_quota_and_space_retry_then_future_saves_stay_on_fallback(self):
         for number in (errno.EDQUOT, errno.ENOSPC):
             with self.subTest(errno=number):
-                self.actor._checkpoint_fallback_active = False
+                self.actor._checkpoint_storage_index = 0
                 save = Mock(side_effect=[OSError(number, "full"), None, None])
                 first = self.actor._save_with_storage_fallback(save, "output_dir", "/primary/hf")
                 second = self.actor._save_with_storage_fallback(save, "output_dir", "/primary/hf-next")
@@ -86,6 +136,20 @@ class CheckpointStorageTests(unittest.TestCase):
                 self.assertEqual(second, str(self.fallback / "primary/hf-next"))
                 self.assertEqual([c.kwargs["output_dir"] for c in save.call_args_list],
                                  ["/primary/hf", first, second])
+
+    def test_all_roots_are_tried_before_retry_and_next_save_keeps_selected_root(self):
+        second = self.root / "second"
+        roots = os.pathsep.join((str(self.fallback), str(second)))
+        save = Mock(side_effect=[OSError(errno.EDQUOT, "full"),
+                                 OSError(errno.ENOSPC, "full"), None, None])
+        with patch.dict(os.environ, {"MOLT_CKPT_FALLBACK_ROOT": roots}):
+            saved = self.actor._save_with_storage_fallback(save, "output_dir", "/primary/hf")
+            following = self.actor._save_with_storage_fallback(save, "output_dir", "/primary/next")
+        self.assertEqual([c.kwargs["output_dir"] for c in save.call_args_list],
+                         ["/primary/hf", str(self.fallback / "primary/hf"),
+                          str(second / "primary/hf"), str(second / "primary/next")])
+        self.assertEqual(saved, str(second / "primary/hf"))
+        self.assertEqual(following, str(second / "primary/next"))
 
     def test_success_and_unrelated_errors_do_not_use_fallback(self):
         save = Mock()
@@ -103,7 +167,7 @@ class CheckpointStorageTests(unittest.TestCase):
         with patch.dict(namespace, retry_on_storage_full=retry):
             self.actor._save_with_storage_fallback(save, "output_dir", "/primary")
         self.assertEqual(retry.call_args.args[1], str(self.fallback / "primary"))
-        self.assertEqual(save.call_count, 1)
+        self.assertEqual(save.call_count, 2)
         save.reset_mock()
         retry.reset_mock()
         with patch.dict(namespace, retry_on_storage_full=retry), patch.dict(
@@ -191,6 +255,25 @@ class CheckpointStorageTests(unittest.TestCase):
         with self.assertRaises(CheckpointException):
             with manager._checkpoint_write():
                 raise wrapped
+
+    def test_metadata_failure_switches_roots_and_recovers_without_barrier_timeout(self):
+        with patch.dict(os.environ, {"GLOO_SOCKET_IFNAME": "lo"}):
+            mp.spawn(metadata_writer, args=(str(self.root / "metadata-init"), str(self.root)),
+                     nprocs=2, join=True)
+        records = [json.loads((self.root / f"metadata-rank{rank}.json").read_text()) for rank in range(2)]
+        self.assertEqual(records[0], records[1])
+        self.assertEqual(len(records[0]["calls"]), 4)
+        self.assertEqual(records[0]["calls"][-1], records[0]["calls"][-2])
+
+    def test_metadata_source_patch_is_idempotent_and_rejects_unknown_layout(self):
+        hook = "    def {method}(self, **kwargs):\n        if _is_group_rank_0(process_group):\n            write_metadata()\n        _group_barrier(process_group)\n"
+        source = ("class ConsolidatedHFAddon:\n" + hook.format(method="pre_save")
+                  + hook.format(method="post_save") + "class PeftAddon:\n" + hook.format(method="pre_save"))
+        patched = metadata_patch.patch_source(source)
+        self.assertEqual(patched.count("with _molt_metadata_write(process_group):"), 3)
+        self.assertEqual(metadata_patch.patch_source(patched), patched)
+        with self.assertRaisesRegex(RuntimeError, "Unsupported NeMo"):
+            metadata_patch.patch_source("class ConsolidatedHFAddon: pass")
 
     def test_two_ranks_switch_together_when_only_one_rank_hits_quota(self):
         with patch.dict(os.environ, {"GLOO_SOCKET_IFNAME": "lo"}):

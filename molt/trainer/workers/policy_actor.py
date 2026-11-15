@@ -960,25 +960,33 @@ class PolicyModelActor(BaseModelActor):
         return status
 
     def _save_with_storage_fallback(self, save, path_key, path, **kwargs):
-        """Retry space/quota failures once, mirroring absolute paths under the fallback root."""
-        fallback_root = os.environ.get("MOLT_CKPT_FALLBACK_ROOT", "")
+        """Try each storage root before waiting for space on the last destination."""
+        roots = os.environ.get("MOLT_CKPT_FALLBACK_ROOT", "").split(os.pathsep)
         original = os.path.abspath(path)
-        fallback = os.path.join(os.path.abspath(fallback_root), original.lstrip(os.sep)) if fallback_root else None
-        destination = fallback if fallback and getattr(self, "_checkpoint_fallback_active", False) else path
-        try:
-            save(**{path_key: destination}, **kwargs)
-        except Exception as exc:
-            if not is_storage_full(exc):
-                raise
-            if fallback and destination != fallback:
-                destination = fallback
-                self.strategy.print(f"Storage full at {path}; switching save to {fallback}")
-                self._checkpoint_fallback_active = True
-            else:
+        destinations = [path]
+        for root in roots:
+            if root:
+                fallback = os.path.join(os.path.abspath(root), original.lstrip(os.sep))
+                if fallback not in destinations:
+                    destinations.append(fallback)
+        start = min(getattr(self, "_checkpoint_storage_index", 0), len(destinations) - 1)
+        for index in range(start, len(destinations)):
+            destination = destinations[index]
+            try:
+                save(**{path_key: destination}, **kwargs)
+            except Exception as exc:
+                if not is_storage_full(exc):
+                    raise
+                if index + 1 < len(destinations):
+                    self.strategy.print(
+                        f"Storage full at {destination}; switching save to {destinations[index + 1]}"
+                    )
+                    continue
                 self.strategy.print(f"Storage full at {destination}; waiting for space")
-            retry_on_storage_full(lambda: save(**{path_key: destination}, **kwargs), destination)
-        self.strategy.print(f"Checkpoint saved at {destination}")
-        return destination
+                retry_on_storage_full(lambda: save(**{path_key: destination}, **kwargs), destination)
+            self._checkpoint_storage_index = index
+            self.strategy.print(f"Checkpoint saved at {destination}")
+            return destination
 
     def export_hf_model(self):
         """Export HF safetensors snapshot to ckpt.output_dir.

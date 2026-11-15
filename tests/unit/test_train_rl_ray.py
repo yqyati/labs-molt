@@ -14,8 +14,6 @@ def test_ray_runtime_env_forwards_wandb_settings(monkeypatch):
         "WANDB_API_KEY": "test-api-key",
         "WANDB_ENTITY": "test-entity",
         "WANDB_MODE": "offline",
-        "MOLT_MOE_EXPERTS": "torch",
-        "MOLT_LINEAR_BACKEND": "torch",
     }
     for name, value in expected.items():
         monkeypatch.setenv(name, value)

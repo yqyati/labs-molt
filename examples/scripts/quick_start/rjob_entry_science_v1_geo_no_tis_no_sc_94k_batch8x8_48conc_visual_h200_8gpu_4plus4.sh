@@ -15,7 +15,7 @@ export N_SAMPLES_PER_PROMPT=8 ROLLOUT_BATCH_SIZE=8 TRAIN_BATCH_SIZE=64
 export ROLLOUT_VLLM_GENERATE_BATCH_SIZE=6
 export DYNAMIC_FILTERING_ENABLE=0 GROUP_LENGTH_PENALTY_ENABLE=0
 export PARTIAL_ROLLOUT_ENABLE=1
-export MAX_LEN=96256 MAX_NEW_TOKENS=96256
+export MAX_LEN=86016 MAX_NEW_TOKENS=86016
 export MAX_IMAGES_PER_PROMPT=1 AGENT_EVAL_ENABLE_MODEL_IMAGE_INPUTS=1
 export AGENT_CONTEXT_COMPACTION=0 AGENT_EVAL_FORCE_FINALIZE=0
 export AGENT_CONTEXT_COMPACT_THRESHOLD_TOKENS=86016
@@ -23,8 +23,8 @@ export TRAIN_MAX_TOKENS_PER_GPU="${TRAIN_MAX_TOKENS_PER_GPU:-25000}"
 export SCIENCE_AGENT_SANDBOX_RESOURCE="${SCIENCE_AGENT_SANDBOX_RESOURCE:-10.12.111.143/ailab-ai4sgi}"
 export SCIENCE_AGENT_ROOT="${SCIENCE_AGENT_ROOT:-$GPFS2_ROOT/yangqingyu/workspace/harness/science-agent-sandbox}"
 export TRAIN_SCRIPT="$SCRIPT_DIR/rl_science_vendor6000_sandbox_batch8x8_length_penalty_h200_8gpu_4plus4.sh"
-export RJOB_NAME="${RJOB_NAME:-science-v1-hf479-geo-no-tis-no-sc-94k-bs8x8-48conc-visual}"
-export RUN_NAME="${RUN_NAME:-science_v1_hf479_geo_no_tis_no_sc_94k_batch8x8_48conc_visual_8gpu_4plus4_$(date +%Y%m%d_%H%M%S)}"
+export RJOB_NAME="${RJOB_NAME:-science-v1-hf479-geo-no-tis-no-sc-84k-bs8x8-48conc-visual}"
+export RUN_NAME="${RUN_NAME:-science_v1_hf479_geo_no_tis_no_sc_84k_batch8x8_48conc_visual_8gpu_4plus4_$(date +%Y%m%d_%H%M%S)}"
 
 exec bash "$SCRIPT_DIR/rjob_entry_science_legacy_react_h200_8gpu_4plus4.sh" \
   --actor.adam.lr 1e-6 --actor.freeze_moe_router --actor.freeze_visual_encoder \

@@ -32,9 +32,6 @@ def _ray_runtime_env_vars():
         "RAY_ENABLE_ZERO_COPY_TORCH_TENSORS": os.environ.get("RAY_ENABLE_ZERO_COPY_TORCH_TENSORS", "1"),
     }
     for name in (
-        "MOLT_AUDIT_PARTIAL_ROUTING",
-        "MOLT_MOE_EXPERTS",
-        "MOLT_LINEAR_BACKEND",
         "FLASHINFER_WORKSPACE_BASE",
         "FLASHINFER_WORKSPACE_DIR",
         "HF_HOME",
