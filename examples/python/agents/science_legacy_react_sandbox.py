@@ -40,7 +40,7 @@ from science_agent.eval.answer_extraction import find_boxed_spans, select_hle_ca
 
 from react_agent_openai_api_tools import MultiTurnReactAgent  # noqa: E402
 from sandbox_gateway import sandbox_run_scope  # noqa: E402
-from judge_client import judge_answer  # noqa: E402
+from judge_client import judge_answer, science_answer_judge_messages  # noqa: E402
 
 
 def _text(value) -> str:
@@ -256,28 +256,14 @@ class ScienceLegacyReactAgent(ChatAgent):
         elif next_protocol:
             judge_system_prompt = ("You are a strict grader for problems across all academic disciplines. Given a problem and a candidate solution, decide whether the candidate answer is correct. Be strict: the final answer must match the ground truth (allow equivalent forms).")
             judge_user_prompt = ("You will output ONLY valid JSON with this schema:\n{\"correct\": true/false, \"reason\": \"one-sentence reason\"}\n\n" f"Problem:\n{ctx.prompt}\n\nCandidate answer (model output):\n{prediction}\n\nGround truth answer:\n{reference}\n")
+        if next_protocol or amo_protocol or fso_protocol:
+            judge_messages = [
+                {"role": "system", "content": judge_system_prompt},
+                {"role": "user", "content": judge_user_prompt},
+            ]
         else:
-            judge_system_prompt = (
-                "You are a grader for problems across all academic disciplines. "
-                "Judge whether the candidate answer is substantially correct and answers the question, "
-                "using the reference answer as the grading reference. "
-                "Accept equivalent wording, reasoning, and mathematical expressions. "
-                "Make your grading decision without unnecessary deliberation, "
-                "and return only the requested JSON with a brief reason."
-            )
-            judge_user_prompt = (
-                'You will output ONLY valid JSON with this schema:\n'
-                '{"score": 1 or 0, "correct": true or false, "reason": "one-sentence reason"}\n\n'
-                "Use score 1 and correct true only when the answer is substantially correct.\n"
-                "Otherwise, use score 0 and correct false.\n\n"
-                f"Problem:\n{ctx.prompt}\n\n"
-                f"Candidate answer (model output):\n{prediction}\n\n"
-                f"Ground truth answer:\n{reference}\n"
-            )
-        grade = await judge_answer(
-            [{"role": "system", "content": judge_system_prompt}, {"role": "user", "content": judge_user_prompt}],
-            require_score=not next_protocol,
-        )
+            judge_messages = science_answer_judge_messages(ctx.prompt, prediction, reference)
+        grade = await judge_answer(judge_messages, require_score=not next_protocol)
         judge_result = grade["judge_result"]
         # -1 means ungraded: training rejects it; evaluation counts it as zero.
         reward = float(judge_result["score"]) if judge_result is not None else -1.0

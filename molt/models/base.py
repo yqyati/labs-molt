@@ -467,6 +467,39 @@ class BaseModel(nn.Module):
             **_mtp_off_kwargs(pretrain_or_model),
             **backend_kwarg,
         )
+        # NeMo shards Qwen QKV projections but leaves TE's partition metadata
+        # at TP=1. Update the existing objects to preserve their CP state.
+        tp_mesh = device_mesh["tp"] if "tp" in mesh_dims else None
+        if (
+            tp_mesh is not None
+            and tp_mesh.size() > 1
+            and is_automodel_custom_model(self.model)
+            and getattr(self.model.config, "model_type", None) in ("qwen3_5", "qwen3_5_text")
+            and backend_cfg["attn"] == "te"
+        ):
+            from nemo_automodel.components.models.qwen3_next.layers import Qwen3NextAttention
+            from transformer_engine.pytorch.attention import DotProductAttention
+
+            repaired = 0
+            for module in self.model.modules():
+                if not isinstance(module, Qwen3NextAttention):
+                    continue
+                attention = module.attn_module
+                if not isinstance(attention, DotProductAttention):
+                    continue
+                tp_size = tp_mesh.size()
+                if attention.num_attention_heads % tp_size or attention.num_gqa_groups % tp_size:
+                    raise ValueError("Qwen TE attention heads must be divisible by training TP size")
+                attention.set_tensor_parallel_group(tp_mesh.get_group())
+                attention.tp_size = tp_size
+                attention.num_gqa_groups_per_partition = attention.num_gqa_groups // tp_size
+                repaired += 1
+            if repaired:
+                print(
+                    f"[Attn] Qwen TE TP configured: layers={repaired}, tp={tp_size}, "
+                    f"local_q_heads={attention.num_attention_heads // tp_size}, "
+                    f"local_kv_heads={attention.num_gqa_groups_per_partition}"
+                )
         # An unmatched --*.lora_target_modules leaves every parameter frozen (AutoModel freezes
         # the base before patching); fail instead of training nothing.
         if self.peft_config is not None and not any(p.requires_grad for p in self.model.parameters()):
@@ -618,6 +651,7 @@ class BaseModel(nn.Module):
         mm_inputs: dict,
         output_hidden_states: bool = False,
         routed_experts: Optional[torch.Tensor] = None,
+        linear_logprobs=None,
     ):
         """Input prep (packing / VLM token-type ids / CP sharding) + model call.
 
@@ -829,7 +863,12 @@ class BaseModel(nn.Module):
             )
             if output_hidden_states:
                 forward_kwargs["output_hidden_states"] = True
-            with replay_ctx:
+            head_context = nullcontext()
+            if linear_logprobs is not None:
+                from .experimental_linear_logprobs import chunked_lm_head
+
+                head_context = chunked_lm_head(self.model, rolled_sequences, *linear_logprobs)
+            with replay_ctx, head_context:
                 output = self.model(**forward_kwargs)
         # AutoModel's custom MoE/LLM models (e.g. Qwen3MoeForCausalLM) return a
         # raw logits Tensor; HF returns a ModelOutput with `.logits`. Normalize.

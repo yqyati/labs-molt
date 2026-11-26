@@ -27,6 +27,8 @@ unset SCIENCE_TRAIN_SANDBOX_ENV_LOADED
 
 MODEL_PATH="${MODEL_PATH:-$SCI_RESEARCH_ROOT/science_model/tool_models/hf_models/p1_rollout1_kimi2.6_subset_kimi_prompt_sft_qwen3.5_35b-0511-201941}"
 DATASET="${DATASET:-$GPFS2_ROOT/yangqingyu/workspace/science_training_reports/vendor_balanced_math40_difficulty6_7_20261023/train.jsonl}"
+DATA_LABEL_KEY="${DATA_LABEL_KEY:-science_item}"
+AGENT_PATH="${AGENT_PATH:-$REPO_ROOT/examples/python/agents/science_legacy_react_sandbox.py}"
 RUN_NAME="${RUN_NAME:-science_agent_vendor3443_math40_grpo_batch8x8_length_penalty_8gpu_4plus4_$(date +%Y%m%d_%H%M%S)}"
 GPFS1_USER_ROOT="${GPFS1_USER_ROOT:-/mnt/shared-storage-user/ai4sgi-gpfs1/yangqingyu}"
 RUN_ROOT="${RUN_ROOT:-$GPFS1_USER_ROOT/workspace/labs-molt/runs/$RUN_NAME}"
@@ -48,6 +50,7 @@ ACTOR_GPUS_PER_NODE="${ACTOR_GPUS_PER_NODE:-4}"
 VLLM_TP_SIZE="${VLLM_TP_SIZE:-4}"
 FSDP_EP_SIZE="${FSDP_EP_SIZE:-4}"
 FSDP_CP_SIZE="${FSDP_CP_SIZE:-4}"
+FSDP_TP_SIZE="${FSDP_TP_SIZE:-1}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-8}"
 ROLLOUT_VLLM_GENERATE_BATCH_SIZE="${ROLLOUT_VLLM_GENERATE_BATCH_SIZE:-6}"
@@ -119,7 +122,7 @@ export WANDB_DISABLED=true RAY_USAGE_STATS_ENABLED=0 VLLM_WORKER_MULTIPROC_METHO
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export MOLT_MOE_RESHARD_AFTER_FWD=0
 export MOLT_MOE_DISPATCHER=hybridep
-export MOLT_DEFER_GRAD_SYNC=1
+export MOLT_DEFER_GRAD_SYNC="${MOLT_DEFER_GRAD_SYNC:-1}"
 export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1
 
 RAY_BIN="${RAY_BIN:-/usr/local/bin/ray}"
@@ -134,8 +137,8 @@ mkdir -p "$NODE_LOG_DIR" "$RAY_TEMP_DIR"
   printf 'hostname='; hostname -f 2>/dev/null || hostname
   printf 'NODE_RANK=%s NODE_COUNT=%s PROC_PER_NODE=%s MASTER_ADDR=%s RAY_ADDRESS=%s\n' \
     "$NODE_RANK" "${NODE_COUNT:-unknown}" "${PROC_PER_NODE:-unknown}" "$MASTER_ADDR" "${RAY_ADDRESS:-unset}"
-  printf 'layout=rollout%s+policy%s policy_world=%s tp=1 cp=%s ep=%s vllm_tp=%s dispatcher=%s max_len=%s\n' \
-    "$VLLM_TP_SIZE" "$ACTOR_GPUS_PER_NODE" "$ACTOR_GPUS_PER_NODE" "$FSDP_CP_SIZE" "$FSDP_EP_SIZE" "$VLLM_TP_SIZE" "$MOLT_MOE_DISPATCHER" "$MAX_LEN"
+  printf 'layout=rollout%s+policy%s policy_world=%s tp=%s cp=%s ep=%s vllm_tp=%s dispatcher=%s max_len=%s\n' \
+    "$VLLM_TP_SIZE" "$ACTOR_GPUS_PER_NODE" "$ACTOR_GPUS_PER_NODE" "$FSDP_TP_SIZE" "$FSDP_CP_SIZE" "$FSDP_EP_SIZE" "$VLLM_TP_SIZE" "$MOLT_MOE_DISPATCHER" "$MAX_LEN"
   env | sort | grep -E '^(RANK|LOCAL_RANK|WORLD_SIZE|MASTER_|NODE_|PROC_PER_NODE|NCCL_|TORCH_NCCL_|TORCH_DISTRIBUTED_DEBUG|MOLT_MOE_|MOLT_DIST_)' || true
   nvidia-smi -q || true
 } >"$NODE_LOG_DIR/node-info.log" 2>&1
@@ -210,14 +213,18 @@ if [[ "${RAY_WORKER_NODE:-0}" == "1" ]]; then
 fi
 
 cd "$REPO_ROOT"
-echo "run=$RUN_NAME sandbox_image=$SCIENCE_AGENT_SANDBOX_IMAGE sandbox_cpu=$SCIENCE_AGENT_SANDBOX_CPU sandbox_memory=$SCIENCE_AGENT_SANDBOX_MEMORY max_new_tokens=$MAX_NEW_TOKENS layout=$VLLM_TP_SIZE+$ACTOR_GPUS_PER_NODE max_len=$MAX_LEN max_samples=$MAX_SAMPLES rollout_batch_size=$ROLLOUT_BATCH_SIZE vllm_generate_batch_size=$ROLLOUT_VLLM_GENERATE_BATCH_SIZE n_samples_per_prompt=$N_SAMPLES_PER_PROMPT train_batch_size=$TRAIN_BATCH_SIZE train_max_tokens_per_gpu=$TRAIN_MAX_TOKENS_PER_GPU dispatcher=$MOLT_MOE_DISPATCHER routing_replay=0 partial_rollout=${PARTIAL_ROLLOUT_ENABLE:-1} policy_gpus=$ACTOR_GPUS_PER_NODE vllm_tp=$VLLM_TP_SIZE fsdp_ep=$FSDP_EP_SIZE fsdp_cp=$FSDP_CP_SIZE"
+echo "run=$RUN_NAME sandbox_image=$SCIENCE_AGENT_SANDBOX_IMAGE sandbox_cpu=$SCIENCE_AGENT_SANDBOX_CPU sandbox_memory=$SCIENCE_AGENT_SANDBOX_MEMORY max_new_tokens=$MAX_NEW_TOKENS layout=$VLLM_TP_SIZE+$ACTOR_GPUS_PER_NODE max_len=$MAX_LEN max_samples=$MAX_SAMPLES rollout_batch_size=$ROLLOUT_BATCH_SIZE vllm_generate_batch_size=$ROLLOUT_VLLM_GENERATE_BATCH_SIZE n_samples_per_prompt=$N_SAMPLES_PER_PROMPT train_batch_size=$TRAIN_BATCH_SIZE train_max_tokens_per_gpu=$TRAIN_MAX_TOKENS_PER_GPU dispatcher=$MOLT_MOE_DISPATCHER routing_replay=0 partial_rollout=${PARTIAL_ROLLOUT_ENABLE:-1} policy_gpus=$ACTOR_GPUS_PER_NODE vllm_tp=$VLLM_TP_SIZE fsdp_tp=$FSDP_TP_SIZE fsdp_ep=$FSDP_EP_SIZE fsdp_cp=$FSDP_CP_SIZE"
 echo "context_compaction=$AGENT_CONTEXT_COMPACTION force_finalize=$AGENT_EVAL_FORCE_FINALIZE soft_limit_tokens=$AGENT_CONTEXT_COMPACT_THRESHOLD_TOKENS"
 "$RAY_BIN" status --address="$RAY_ADDRESS" >"$LOG_ROOT/ray-cluster-status.txt" 2>&1 || true
 env | sort | grep -E '^(RANK|LOCAL_RANK|WORLD_SIZE|MASTER_|NODE_|PROC_PER_NODE|NCCL_|TORCH_NCCL_|TORCH_DISTRIBUTED_DEBUG|MOLT_MOE_|MOLT_DIST_)' >"$LOG_ROOT/distributed-environment.log" || true
 set +e
-python3 -u -m molt.cli.train_rl_ray \
+TRAIN_COMMAND=(python3 -u -m molt.cli.train_rl_ray)
+if [[ -n "${MOLT_TRAIN_WRAPPER:-}" ]]; then
+  TRAIN_COMMAND=(python3 -u "$MOLT_TRAIN_WRAPPER")
+fi
+"${TRAIN_COMMAND[@]}" \
   --actor.model_name_or_path "$MODEL_PATH" \
-  --data.prompt_dataset "$DATASET" --data.input_key prompt --data.label_key science_item --data.apply_chat_template \
+  --data.prompt_dataset "$DATASET" --data.input_key prompt --data.label_key "$DATA_LABEL_KEY" --data.apply_chat_template \
   --data.max_samples "$MAX_SAMPLES" --data.max_len "$MAX_LEN" \
   --data.max_images_per_prompt "$MAX_IMAGES_PER_PROMPT" \
   --rollout.batch_size "$ROLLOUT_BATCH_SIZE" --rollout.vllm_generate_batch_size "$ROLLOUT_VLLM_GENERATE_BATCH_SIZE" --rollout.micro_batch_size 1 \
@@ -228,14 +235,14 @@ python3 -u -m molt.cli.train_rl_ray \
   --actor.num_nodes 1 --actor.num_gpus_per_node "$ACTOR_GPUS_PER_NODE" \
   --vllm.num_engines 1 --vllm.tensor_parallel_size "$VLLM_TP_SIZE" --vllm.sync_backend nccl --vllm.enable_auto_tool_choice --vllm.tool_call_parser qwen3_coder \
   --vllm.gpu_memory_utilization 0.8 --vllm.distributed_executor_backend mp --vllm.enable_prefix_caching \
-  --fsdp.param_dtype bf16 --fsdp.attn_implementation te --fsdp.tp_size 1 --fsdp.ep_size "$FSDP_EP_SIZE" --fsdp.cp_size "$FSDP_CP_SIZE" --fsdp.offload "$FSDP_OFFLOAD" \
+  --fsdp.param_dtype bf16 --fsdp.attn_implementation te --fsdp.tp_size "$FSDP_TP_SIZE" --fsdp.ep_size "$FSDP_EP_SIZE" --fsdp.cp_size "$FSDP_CP_SIZE" --fsdp.offload "$FSDP_OFFLOAD" \
   --actor.gradient_checkpoint full --actor.adam.lr 1e-6 --actor.entropy_coef 0 --actor.loss_mode ppo --actor.eps_clip_low_high 0.2 0.27 \
   --algo.advantage.estimator reinforce_baseline --algo.advantage.is_correction_level geo --train.force_on_policy \
   "${dynamic_filter_args[@]}" --algo.kl.estimator k1 --algo.kl.init_coef 0 --reward.clip_range -10 10 \
   "${length_penalty_args[@]}" --reward.group_length_penalty.min_pass_rate 0.5 \
   --reward.group_length_penalty.quantile 0.5 --reward.group_length_penalty.max_penalty 0.1 \
   --reward.group_length_penalty.tolerance 0.2 --reward.group_length_penalty.saturation 1.0 \
-  --train.agent_path "$REPO_ROOT/examples/python/agents/science_legacy_react_sandbox.py" \
+  --train.agent_path "$AGENT_PATH" \
   --ckpt.output_dir "$SAVE_ROOT/hf" --ckpt.path "$SAVE_ROOT/state" --ckpt.save_steps "$CKPT_SAVE_STEPS" --ckpt.max_num 0 \
   --no-ckpt.save_optimizer --logger.logging_steps 1 --logger.tensorboard_dir "$RUN_ROOT/tensorboard" \
   "$@" \

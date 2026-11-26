@@ -16,13 +16,14 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
+import os
 from typing import Optional
 
 import torch
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
-from molt.trainer.fsdp.packing import log_probs_from_vocab_parallel_logits, unshard_dtensor
+from molt.trainer.fsdp.packing import is_automodel_custom_model, log_probs_from_vocab_parallel_logits, unshard_dtensor
 
 from .base import BaseModel, _AttrDict
 from .utils import compute_entropy, log_probs_from_logits
@@ -63,9 +64,40 @@ class Actor(BaseModel):
                                 — only when given (score centering).
         - ``aux_loss``:         MoE load-balancing loss — only for NeMo custom MoE.
         """
+        experimental = os.environ.get("MOLT_EXPERIMENTAL_LINEAR_LOGPROBS") == "1"
+        forward_options = {}
+        if experimental:
+            tp_mesh = self.device_mesh["tp"]
+            if (
+                tp_mesh.size() != 1
+                or not is_automodel_custom_model(self.model)
+                or getattr(self.model.config, "model_type", None) != "qwen3_5"
+                or self.peft_config is not None
+                or top_ids is not None
+                or (return_entropy and not entropy_no_grad)
+            ):
+                raise ValueError("Experimental linear logprobs require Qwen3.5, TP1, no score centering/entropy loss")
+            forward_options["linear_logprobs"] = (self.temperature, return_entropy)
+            if not getattr(self, "_linear_logprobs_announced", False):
+                print(f"[Attn] Experimental chunked LM-head logprobs enabled: TP=1, CP={self.cp_size}, chunk=256")
+                self._linear_logprobs_announced = True
         output, rolled_sequences, cp_forward, indices, batch, seqlen = self._forward_backbone(
-            sequences, attention_mask, position_ids, cp_context_stack, mm_inputs, routed_experts=routed_experts
+            sequences, attention_mask, position_ids, cp_context_stack, mm_inputs,
+            routed_experts=routed_experts, **forward_options,
         )
+        if experimental:
+            token_stats = output.pop("logits")
+            output["logits"] = None
+            output["log_probs"] = self._restore_full_sequence(
+                token_stats[..., 0], cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
+            )[:, :-1]
+            if return_entropy:
+                output["entropy"] = self._restore_full_sequence(
+                    token_stats[..., 1].detach(), cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
+                )[:, :-1]
+            if action_mask is not None:
+                output["action_log_probs"] = output["log_probs"][:, -action_mask.shape[1]:] * action_mask.float()
+            return output
         logits = output["logits"]
         full_logits = None
 

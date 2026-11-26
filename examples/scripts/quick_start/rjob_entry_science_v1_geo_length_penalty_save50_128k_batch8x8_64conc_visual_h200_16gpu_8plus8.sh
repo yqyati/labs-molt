@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Science v1 RL from the HF SFT checkpoint with image support, geo correction,
+# 8 prompts x 8 samples, group length penalties, and checkpoints every 50 steps.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${MOLT_PATH:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
+GPFS2_ROOT="${GPFS2_ROOT:-/mnt/shared-storage-gpfs2/ai4sgi-gpfs2}"
+SCI_RESEARCH_ROOT="${SCI_RESEARCH_ROOT:-$GPFS2_ROOT/scientific_reasoning_and_research}"
+
+export MODEL_PATH="${MODEL_PATH:-$SCI_RESEARCH_ROOT/yangqingyu/model/qwen35_sft479_nemo_moe_visual}"
+export DATASET="${DATASET:-$SCI_RESEARCH_ROOT/yangqingyu/rft/molt_science_legacy/train.jsonl}"
+export MAX_SAMPLES="${MAX_SAMPLES:-3000}"
+export N_SAMPLES_PER_PROMPT=8 ROLLOUT_BATCH_SIZE=8 TRAIN_BATCH_SIZE=64
+export ACTOR_GPUS_PER_NODE=8 VLLM_TP_SIZE=8 FSDP_EP_SIZE=8 FSDP_CP_SIZE=8
+export ROLLOUT_VLLM_GENERATE_BATCH_SIZE=8
+export DYNAMIC_FILTERING_ENABLE=0 GROUP_LENGTH_PENALTY_ENABLE=1
+export PARTIAL_ROLLOUT_ENABLE=1
+export MAX_LEN=131072 MAX_NEW_TOKENS=131072
+export MAX_IMAGES_PER_PROMPT=1 AGENT_EVAL_ENABLE_MODEL_IMAGE_INPUTS=1
+export AGENT_CONTEXT_COMPACTION=0 AGENT_EVAL_FORCE_FINALIZE=0
+export AGENT_CONTEXT_COMPACT_THRESHOLD_TOKENS=131072
+export TRAIN_MAX_TOKENS_PER_GPU="${TRAIN_MAX_TOKENS_PER_GPU:-25000}"
+export SCIENCE_AGENT_SANDBOX_RESOURCE="${SCIENCE_AGENT_SANDBOX_RESOURCE:-10.12.111.143/ailab-ai4sgi}"
+export SCIENCE_AGENT_ROOT="${SCIENCE_AGENT_ROOT:-$GPFS2_ROOT/yangqingyu/workspace/harness/science-agent-sandbox}"
+export TRAIN_SCRIPT="$SCRIPT_DIR/rl_science_vendor6000_sandbox_batch8x8_length_penalty_h200_8gpu_4plus4.sh"
+export RJOB_NAME="${RJOB_NAME:-science-v1-hf479-geo-lenpen-save50-128k-bs8x8-64conc-visual-16gpu}"
+export RUN_NAME="${RUN_NAME:-science_v1_hf479_geo_lenpen_save50_128k_batch8x8_64conc_visual_16gpu_8plus8_$(date +%Y%m%d_%H%M%S)}"
+
+exec bash "$SCRIPT_DIR/rjob_entry_science_legacy_react_h200_8gpu_4plus4.sh" \
+  --actor.adam.lr 1e-6 --actor.freeze_moe_router --actor.freeze_visual_encoder --actor.log_entropy \
+  --algo.advantage.estimator reinforce_baseline \
+  --actor.loss_agg_mode token-mean --actor.eps_clip_low_high 0.2 0.27 \
+  --algo.advantage.is_correction_level geo \
+  --algo.advantage.is_correction_gating ratio \
+  --algo.advantage.is_correction_mode mask --algo.advantage.is_correction_threshold 0.5 5.0 \
+  --algo.advantage.score_centering_top_k 0 \
+  --reward.group_length_penalty.max_penalty 0.2 \
+  --train.async_queue_size 2 --train.partial_rollout_enable \
+  --train.rollout_dump_dir "" \
+  --ckpt.save_steps 50 --ckpt.save_hf \
+  --rollout.temperature 1.0 --rollout.top_p 1.0 --train.max_epochs 1 \
+  "$@"

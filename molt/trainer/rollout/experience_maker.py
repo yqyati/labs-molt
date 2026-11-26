@@ -235,8 +235,14 @@ class RemoteExperienceMaker:
             if self.advantage_estimator not in GROUP_ADVANTAGE_ESTIMATORS or args.rollout.n_samples_per_prompt <= 1:
                 raise ValueError("Group length penalty requires same-prompt multi-sample group advantages.")
             raw_rewards = rollouts["rewards"]
-            if not torch.all((raw_rewards == 0) | (raw_rewards == 1)):
+            success_threshold = getattr(penalty, "success_threshold", None)
+            if success_threshold is None and not torch.all((raw_rewards == 0) | (raw_rewards == 1)):
                 raise ValueError("Group length penalty requires binary correctness rewards (0 or 1).")
+            if success_threshold is not None and not (
+                0 <= success_threshold < 1
+                and torch.all(torch.isfinite(raw_rewards) & (raw_rewards >= 0) & (raw_rewards <= 1))
+            ):
+                raise ValueError("Continuous group length penalty requires rewards in [0, 1] and success_threshold in [0, 1).")
             # Action masks exclude prompts and tool observations. Sum all segments of a rollout,
             # while its repeated terminal reward is counted only once by _merge_rollout_rewards.
             sample_lengths = torch.cat([exp.action_mask.sum(dim=-1) for exp in experiences]).to(rewards)
@@ -254,7 +260,8 @@ class RemoteExperienceMaker:
                 if len(group) != args.rollout.n_samples_per_prompt:
                     incomplete_groups += 1
                     continue
-                successful = raw_rewards[group] == 1
+                successful = (raw_rewards[group] == 1 if success_threshold is None
+                              else raw_rewards[group] > success_threshold)
                 if successful.sum().item() / len(group) <= penalty.min_pass_rate:
                     continue
                 eligible_groups += 1

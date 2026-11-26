@@ -40,6 +40,9 @@ def _ray_runtime_env_vars():
         "TRANSFORMERS_CACHE",
         "TORCH_COMPILE_DISABLE",
         "PYTORCH_CUDA_ALLOC_CONF",
+        "MOLT_DEFER_GRAD_SYNC",
+        "MOLT_LINEAR_BACKEND",
+        "MOLT_EXPERIMENTAL_LINEAR_LOGPROBS",
         "VLLM_WORKER_MULTIPROC_METHOD",
         "WANDB_API_KEY",
         "WANDB_ENTITY",
@@ -626,7 +629,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--reward.group_length_penalty.enable",
         action="store_true",
-        help="Penalize overlong successful trajectories within complete same-prompt groups (binary rewards only).",
+        help="Penalize overlong successful trajectories within complete same-prompt groups.",
+    )
+    parser.add_argument(
+        "--reward.group_length_penalty.success_threshold", type=float, default=None,
+        help="Opt into continuous rewards in [0, 1]; success means reward strictly above this threshold. Default requires binary rewards.",
     )
     parser.add_argument(
         "--reward.group_length_penalty.min_pass_rate",
@@ -1070,6 +1077,8 @@ if __name__ == "__main__":
     # --- Algorithm checks ---
     length_penalty = args.reward.group_length_penalty
     if length_penalty.enable:
+        if length_penalty.success_threshold is not None and not (0 <= length_penalty.success_threshold < 1):
+            raise ValueError("Group length penalty success_threshold must be in [0, 1).")
         if args.algo.advantage.estimator not in ("grpo", "dr_grpo", "reinforce_baseline", "rloo"):
             raise ValueError("Group length penalty requires a group-relative advantage estimator.")
         if args.rollout.n_samples_per_prompt <= 1:
